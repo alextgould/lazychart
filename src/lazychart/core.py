@@ -7,6 +7,10 @@ from .colors import DEFAULT_PALETTE, COLORBLIND_PALETTE
 from functools import wraps
 import collections.abc
 
+# Logging
+from lazychart.log import create_logger
+logger = create_logger(__name__)
+
 # Decorators (apply to all chart functions)
 
 def show_chart(func: Callable) -> Callable:
@@ -26,7 +30,6 @@ def show_chart(func: Callable) -> Callable:
             fig.savefig(save_path, bbox_inches="tight")
 
         if show_fig:
-            plt.tight_layout()
             plt.show()
             return None
         return fig, ax
@@ -54,7 +57,7 @@ def sticky_args(func):
         # all charts need data
         if kwargs.get('data', None) is None:
             raise ValueError('No data to chart')
-
+        
         return func(self, *args, **kwargs)
     return wrapper
 
@@ -74,14 +77,14 @@ class CommonArgsArgs(TypedDict, total=False):
     # labels
     title: Optional[str] = None
     subtitle: Optional[str] = None
-    xlabel: Optional[str] = None
-    ylabel: Optional[str] = None
+    x_label: Optional[str] = None
+    y_label: Optional[str] = None
 
     # label font size
     title_size: Optional[Union[str, int]] = None
     subtitle_size: Optional[Union[str, int]] = None
-    xlabel_size: Optional[Union[str, int]] = None
-    ylabel_size: Optional[Union[str, int]] = None
+    x_label_size: Optional[Union[str, int]] = None
+    y_label_size: Optional[Union[str, int]] = None
     tick_size: Optional[Union[str, int]] = None
     
     # axis ranges
@@ -98,11 +101,11 @@ class CommonArgsArgs(TypedDict, total=False):
     ytick_rotation: Optional[int] = None
 
     # legend
-    show_legend: bool = True
-    legend_loc: str = "best" # TODO: presets e.g. right, bottom 
+    legend: Optional[str] = None
 
-    # other
-    show_grid: bool = True
+    # grid
+    grid_x: bool = False
+    grid_y: bool = True
 
 def common_args(func: Callable) -> Callable:
     """
@@ -116,8 +119,9 @@ def common_args(func: Callable) -> Callable:
           - group_other_name (str, default: 'Other'): name of new category containing smaller categories
            
         - labels
-          - title, subtitle, xlabel, ylabel (str): Various labels
-          - title_size, subtitle, xlabel, ylabel, tick_size: Font size of labels (int or str preset)
+          - title, subtitle, x_label, y_label (str): Various labels
+            for x_label and y_label pass "" to have no label, otherwise variable names are used by default
+          - title_size, subtitle, x_label, y_label, tick_size: Font size of labels (int or str preset)
             presets: 'small', 'medium', 'large', 'x-large'
           
         - axes
@@ -127,24 +131,410 @@ def common_args(func: Callable) -> Callable:
             - xtick_rotation, ytick_rotation (int): degrees rotation of tick labels
 
         - other
-          - show_legend (bool, default: True): whether to show the legend
-          - legend_loc (str, default: best): legend position (TODO presets)
-          - show_grid (bool, True): whether to show gridlines
+          - legend (str, default: right): where to place the legend
+            presets: right, bottom, overlap, hide
+          - grid_x, grid_y (bool): whether to show gridlines (default: hide x, show y)
     """
 
     FONT_PRESETS = {
-        "small":    {"title": 12, "subtitle": 11, "xlabel": 10, "ylabel": 10, "tick": 9},
-        "medium":   {"title": 16, "subtitle": 14, "xlabel": 12, "ylabel": 12, "tick": 10},
-        "large":    {"title": 20, "subtitle": 18, "xlabel": 16, "ylabel": 16, "tick": 12},
-        "x-large":  {"title": 24, "subtitle": 20, "xlabel": 18, "ylabel": 18, "tick": 14},
+        "small":    {"title": 12, "subtitle": 11, "x_label": 10, "y_label": 10, "tick": 9},
+        "medium":   {"title": 16, "subtitle": 14, "x_label": 12, "y_label": 12, "tick": 10},
+        "large":    {"title": 20, "subtitle": 18, "x_label": 16, "y_label": 16, "tick": 12},
+        "x-large":  {"title": 24, "subtitle": 20, "x_label": 18, "y_label": 18, "tick": 14},
     }
+
+    LEGEND_PRESETS = {
+        "right":   {"loc": "center left", "bbox_to_anchor": (1.0, 0.5)},
+        "bottom":  {"loc": "upper center", "bbox_to_anchor": (0.5, -0)},
+        #"overlap": {"loc": "best", "bbox_to_anchor": None},
+    }
+
+    # def _auto_adjust_for_legend(fig, ax, legend, padding=0.02):
+    #     """Expand figure size to accomodate legends placed right/bottom (outside the axes).
+    #     matplotlib's tight_layout() and plt.subplots(constrained_layout=True) options seem to struggle with this.
+    #     """
+
+    #     logger.debug(f'attempt to _auto_adjust_for_legend {legend}')
+    #     if legend == 'bottom': # horizontal list
+    #         ncol = len(ax.get_legend_handles_labels()[1])
+    #     else:
+    #         ncol = 1 # vertical list
+
+    #     width, height = fig.get_size_inches()
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     logger.debug("Before initial legend: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #     )
+
+    #     # add legend at random location
+    #     leg = ax.legend(loc='lower left', ncol=ncol)
+
+    #     # compute layout
+    #     fig.canvas.draw()
+
+    #     # get legend bbox in figure coordinates
+    #     width, height = fig.get_size_inches()
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
+    #     logger.debug("After initial legend: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #     )
+
+    #     # remove legend and add another with updated bbox_to_anchor value
+    #     leg.remove()
+    #     if legend == 'bottom':
+    #         leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0 - (bbox.height + padding)), ncol=ncol)
+    #     elif legend == 'right':
+    #         leg = ax.legend(loc='center left', bbox_to_anchor=(1 + (bbox.width + padding), 0.5), ncol=ncol)
+
+    #     width, height = fig.get_size_inches()
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
+    #     logger.debug("After revised legend: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #     )
+        
+    #     # compute layout - is this necessary?
+    #     fig.canvas.draw()
+        
+    #     width, height = fig.get_size_inches()
+        
+    #     # If legend extends past right side
+    #     if bbox.x1 > 1:
+    #         extra_width = bbox.x1 - 1
+    #         fig.set_size_inches(width * (1 + extra_width), height)
+
+    #     # If legend extends below the bottom
+    #     if bbox.y0 < 0:
+    #         extra_height = abs(bbox.y0)
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #         pos = ax.get_position()
+    #         new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
+    #         ax.set_position(new_pos)
+
+    #         logger.debug(f"adjusting size due to extra_height {extra_height} on bottom")
+
+    #     # If legend extends above the top (e.g., large right-side legend)
+    #     if bbox.y1 > 1:
+    #         extra_height = bbox.y1 - 1
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     logger.debug("After resizing: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #     )
+
+        
+        # leg = ax.legend(loc=legend_pos, bbox_to_anchor=preset["bbox_to_anchor"], ncol=ncol
+        #         )
+        
+        
+        # width, height = fig.get_size_inches()
+        # ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+
+
+        # if legend_pos == 'bottom':
+
+        #     # increase height by the legend's bbox height plus a padding fraction
+        #     extra_height = (bbox.y1 - bbox.y0) * (1 + padding)
+        #     fig.set_size_inches(width, height * (1 + extra_height))
+
+        #     # Move axes up by extra_height fraction and shrink height accordingly
+        #     pos = ax.get_position()
+        #     new_y0 = pos.y0 + extra_height
+        #     new_height = pos.height - extra_height
+        #     ax.set_position([pos.x0, new_y0, pos.width, new_height])
+        #     logger.debug(f"Adjusted for bottom legend: extra_height={extra_height}")
+
+        # elif legend_pos == 'right':
+            
+        #     # increase width by legend's bbox width plus padding
+        #     extra_width = (bbox.x1 - bbox.x0) * (1 + padding)
+        #     fig.set_size_inches(width * (1 + extra_width), height)
+
+        #     # Optionally move/shrink axes horizontally if needed
+        #     pos = ax.get_position()
+        #     new_width = pos.width - extra_width
+        #     ax.set_position([pos.x0, pos.y0, new_width, pos.height])
+        #     logger.debug(f"Adjusted for right legend: extra_width={extra_width}")
+
+        # resized = False
+
+        # # Legend extends past right side
+        # if bbox.x1 > 1:
+        #     extra_width = bbox.x1 - 1
+        #     fig.set_size_inches(width * (1 + extra_width), height)
+        #     resized = True
+        #     logger.debug(f"adjusting size due to extra_width {extra_width} on right side")
+
+        # # Legend extends below bottom
+        # if bbox.y0 < 0:
+        #     extra_height = abs(bbox.y0)
+        #     fig.set_size_inches(width, height * (1 + extra_height))
+        #     logger.debug(f"adjusting size due to extra_height {extra_height} on bottom")
+        #     # Shift axes upward by this fraction to avoid overlap
+        #     pos = ax.get_position()
+        #     new_y0 = pos.y0 + extra_height
+        #     new_height = pos.height - extra_height
+        #     if new_height <= 0:
+        #         new_height = pos.height * 0.8  # fallback: shrink a bit
+        #     logger.debug(f"about to set using ax.set_position ax.get_position().bounds is {ax.get_position().bounds}")
+        #     ax.set_position([pos.x0, new_y0, pos.width, new_height])
+        #     logger.debug(f"finished setting using ax.set_position ax.get_position().bounds is {ax.get_position().bounds}")
+
+        #     resized = True
+
+        # # Legend extends above top (rare case)
+        # if bbox.y1 > 1:
+        #     extra_height = bbox.y1 - 1
+        #     fig.set_size_inches(width, height * (1 + extra_height))
+        #     resized = True
+
+        # #if resized:
+        #     #fig.tight_layout()
+
+        # width, height = fig.get_size_inches()
+        # ax_pos = ax.get_position().bounds
+        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+        # logger.debug("After making changes: | "
+        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+        # )
+
+        #logger.debug(f"After: fig size=({width:.3f},{height:.3f}), ax_pos={ax_pos}, legend bbox=({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f})")
+
+    # def _auto_adjust_for_legend(fig, ax, legend, pad_fraction=0):
+    #     """
+    #     Expands figure size if legend is outside the plot area.
+    #     Uses tight_layout after resizing to avoid squished axes.
+    #     """
+
+    #     fig.canvas.draw()  # ensure layout is computed
+    #     width, height = fig.get_size_inches()
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+    #     logger.debug("Before making changes: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #     )
+
+    #     # If legend extends past right side
+    #     if bbox.x1 > 1:
+    #         extra_width = bbox.x1 - 1
+    #         fig.set_size_inches(width * (1 + extra_width), height)
+
+    #     # If legend extends below the bottom
+    #     if bbox.y0 < 0:
+    #         extra_height = abs(bbox.y0)
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #         pos = ax.get_position()
+    #         new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
+    #         ax.set_position(new_pos)
+
+    #     # If legend extends above the top (e.g., large right-side legend)
+    #     if bbox.y1 > 1:
+    #         extra_height = bbox.y1 - 1
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #     width, height = fig.get_size_inches()
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+    #     logger.debug("After making changes: | "
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #     )
+
+        # fig.canvas.draw()  # ensure layout is computed
+        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+        # ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+
+        # width, height = fig.get_size_inches()
+        # extra_width = max(0, bbox.x1 - 1)
+        # extra_height_bottom = max(0, -bbox.y0)
+        # extra_height_top = max(0, bbox.y1 - 1)
+        # logger.debug("Before making changes: | "
+        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+        # )
+
+        # # Amount the legend sticks out beyond figure bounds
+        # extra_left = max(0, -bbox.x0)
+        # extra_right = max(0, bbox.x1 - 1)
+        # extra_bottom = max(0, -bbox.y0)
+        # extra_top = max(0, bbox.y1 - 1)
+
+        # logger.debug(
+        #     f"Extra L/R: {extra_left:.3f}/{extra_right:.3f}, Extra T/B: {extra_top:.3f}/{extra_bottom:.3f}"
+        # )
+
+        # # Additional padding
+        # extra_left += pad_fraction
+        # extra_right += pad_fraction
+        # extra_bottom += pad_fraction
+        # extra_top += pad_fraction
+
+        # # Expand figure size
+        # new_width = width * (1 + extra_left + extra_right)
+        # new_height = height * (1 + extra_top + extra_bottom)
+
+        # if new_width > width or new_height > height:
+        #     fig.set_size_inches(new_width, new_height)
+        #     #fig.tight_layout()  # let Matplotlib handle repositioning
+
+        # logger.debug("After making changes: | "
+        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+        # )
+
+        # if new_width > width or new_height > height:
+        #     #fig.set_size_inches(new_width, new_height)
+        #     fig.tight_layout()  # let Matplotlib handle repositioning
+
+        # logger.debug("After making changes and after tight_layout(): | "
+        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+        # )
+
+    # def _auto_adjust_for_legend(fig, ax, legend):
+    #     """Expand figure size if legend is outside the visible area."""
+    #     fig.canvas.draw()  # ensure layout is computed
+    #     bbox = legend.get_window_extent()
+    #     inv = fig.transFigure.inverted()
+    #     legend_bbox = bbox.transformed(inv)
+
+    #     width, height = fig.get_size_inches()
+
+    #     # If legend extends past right side
+    #     if legend_bbox.x1 > 1:
+    #         extra_width = legend_bbox.x1 - 1
+    #         fig.set_size_inches(width * (1 + extra_width), height)
+
+    #     # If legend extends below the bottom
+    #     if legend_bbox.y0 < 0:
+    #         extra_height = abs(legend_bbox.y0)
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #     # If legend extends above the top (e.g., large right-side legend)
+    #     if legend_bbox.y1 > 1:
+    #         extra_height = legend_bbox.y1 - 1
+    #         fig.set_size_inches(width, height * (1 + extra_height))
+
+    #     # Use logging to see what is going on
+    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
+    #     extra_width = max(0, bbox.x1 - 1)
+    #     extra_height_bottom = max(0, -bbox.y0)
+    #     extra_height_top = max(0, bbox.y1 - 1)
+    #     logger.debug(
+    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
+    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
+    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
+    #         f"Extra W: {extra_width:.3f}, Extra H bottom: {extra_height_bottom:.3f}, Extra H top: {extra_height_top:.3f}"
+    #     )
+
+    def _auto_adjust_for_legend(fig, ax, legend_pos, padding=0.02):
+        """
+        Adjust figure size and axes position to accommodate legends placed
+        outside the axes on the right or bottom.
+
+        Parameters:
+            fig: matplotlib.figure.Figure
+            ax: matplotlib.axes.Axes
+            legend_pos: str, either 'bottom' or 'right'
+            padding: float, extra padding in figure fraction units
+        
+        This function places a temporary legend, measures its bbox,
+        then resizes the figure and repositions the axes to make room.
+        """
+
+        # Determine number of columns for legend
+        handles, labels = ax.get_legend_handles_labels()
+        ncol = len(labels) if legend_pos == 'bottom' else 1
+
+        # Step 1: Add a temporary legend at initial "outside" position
+        if legend_pos == 'bottom':
+            leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0), ncol=ncol)
+        elif legend_pos == 'right':
+            leg = ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), ncol=ncol)
+        else:
+            raise ValueError("legend_pos must be 'bottom' or 'right'")
+
+        fig.canvas.draw()  # Needed to compute bbox
+
+        # Step 2: Get legend bounding box in figure coords
+        bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
+        width, height = fig.get_size_inches()
+        pos = ax.get_position()
+
+        # Remove the temporary legend before adding adjusted one
+        leg.remove()
+
+        # Step 3: Calculate needed expansion and adjust figure & axes
+
+        if legend_pos == 'bottom':
+            # Legend extends below the axes, check if y0 < 0
+            extra_height = max(0, -bbox.y0 + padding)
+
+            if extra_height > 0:
+                # Increase figure height
+                new_height = height * (1 + extra_height)
+                fig.set_size_inches(width, new_height)
+
+                # Shift axes up and reduce height accordingly
+                new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
+                ax.set_position(new_pos)
+
+                # Adjust subplot bottom margin to not cut off axes labels
+                fig.subplots_adjust(bottom=pos.y0 + extra_height + padding)
+
+            # Re-add legend with adjusted bbox_to_anchor to sit below axes
+            leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0 - extra_height), ncol=ncol)
+
+        elif legend_pos == 'right':
+            # Legend extends beyond right, check if x1 > 1
+            extra_width = max(0, bbox.x1 - 1 + padding)
+
+            if extra_width > 0:
+                # Increase figure width
+                new_width = width * (1 + extra_width)
+                fig.set_size_inches(new_width, height)
+
+                # Shrink axes width to make room for legend
+                new_pos = [pos.x0, pos.y0, pos.width - extra_width, pos.height]
+                ax.set_position(new_pos)
+
+                # Adjust subplot right margin to prevent clipping
+                fig.subplots_adjust(right=pos.x0 + pos.width - extra_width - padding)
+
+            # Re-add legend with adjusted bbox_to_anchor to sit right of axes
+            leg = ax.legend(loc='center left', bbox_to_anchor=(1 + extra_width, 0.5), ncol=ncol)
+
+        fig.canvas.draw()  # Redraw with new layout
+
+        # Debug info (optional)
+        # bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
+        # ax_pos = ax.get_position().bounds
+        # print(f"Figure size: {fig.get_size_inches()}, Axes pos: {ax_pos}, Legend bbox: {bbox}")
     
     @wraps(func)
     def wrapper(self, *args, **kwargs):
 
-        ## Create the plot
-
-        # combine smaller categories
+        # Preprocess data for small category grouping
         data = kwargs.get('data')
         group_by = kwargs.get('group_by')
         group_threshold = kwargs.get('group_threshold')
@@ -165,28 +555,18 @@ def common_args(func: Callable) -> Callable:
                 keep_cats = sorted_cats.index[:group_threshold].tolist()
                 small_cats = [cat for cat in sorted_cats.index if cat not in keep_cats]
             group_other_name = kwargs.get('group_other_name')
+            
+            # avoid modifying caller's dataframe
+            data = data.copy()
             data[group_by] = data[group_by].replace(small_cats, group_other_name if group_other_name else "Other")
+            kwargs['data'] = data
 
         # call the charting function
         fig, ax = func(self, *args, **kwargs)
 
         ## Customise appearance
 
-        # labels
-        title = kwargs.get('title')
-        if title is not None:
-            ax.set_title(title)
-        subtitle = kwargs.get('subtitle')
-        if subtitle is not None:
-            ax.set_title(title)
-        xlabel = kwargs.get('xlabel')
-        if (xlabel is not None) and hasattr(ax, "xlabel"):
-            ax.set_xlabel(xlabel)
-        ylabel = kwargs.get('ylabel')
-        if (ylabel is not None) and hasattr(ax, "ylabel"):
-            ax.set_ylabel(ylabel)
-        
-        # label font size
+        # Labels
         def resolve_fontsize(val, category):
             if isinstance(val, int):
                 return val
@@ -194,53 +574,37 @@ def common_args(func: Callable) -> Callable:
                 preset = FONT_PRESETS.get(val.lower())
                 if preset:
                     return preset[category]
-            return FONT_PRESETS.get('medium')[category] # fall back to medium
-        title_size = kwargs.get('title_size')
-        title_size = resolve_fontsize(title_size, "title")
-        if title is not None and hasattr(ax, "set_title"):
-            ax.set_title(title, fontsize=title_size)
-        subtitle_size = kwargs.get('subtitle_size')
-        subtitle_size = resolve_fontsize(subtitle_size, "subtitle")
-        if subtitle is not None and hasattr(ax, "set_subtitle"):
-            ax.set_subtitle(title, fontsize=title_size)
-        xlabel_size = kwargs.get('xlabel_size')
-        xlabel_size = resolve_fontsize(xlabel_size, "xlabel")
-        if xlabel is not None and hasattr(ax, "set_xlabel"):
-            ax.set_xlabel(xlabel, fontsize=xlabel_size)
-        ylabel_size = kwargs.get('ylabel_size')
-        ylabel_size = resolve_fontsize(ylabel_size, "ylabel")
-        if ylabel is not None and hasattr(ax, "set_ylabel"):
-            ax.set_ylabel(ylabel, fontsize=ylabel_size)
-        tick_size = kwargs.get('tick_size')
-        tick_size = resolve_fontsize(tick_size, "tick")
-        if tick_size is not None:
-            ax.tick_params(axis='both', labelsize=tick_size)
+            return FONT_PRESETS["medium"][category]
 
-        # axis ranges
-        x_min = kwargs.get('x_min')
-        x_max = kwargs.get('x_max')
-        if (x_min is not None or x_max is not None) and hasattr(ax, "set_xlim"):
-            ax.set_xlim(x_min, x_max)
-        y_min = kwargs.get('y_min')
-        y_max = kwargs.get('y_max')
-        if (y_min is not None or y_max is not None) and hasattr(ax, "set_ylim"):
-            ax.set_ylim(y_min, y_max)
+        if (title := kwargs.get('title')):
+            ax.set_title(title, fontsize=resolve_fontsize(kwargs.get('title_size'), "title"))
+        if (subtitle := kwargs.get('subtitle')) and hasattr(ax, "set_subtitle"):
+            ax.set_subtitle(subtitle, fontsize=resolve_fontsize(kwargs.get('subtitle_size'), "subtitle"))
+        if (x_label := kwargs.get('x_label')):
+            ax.set_xlabel(x_label, fontsize=resolve_fontsize(kwargs.get('x_label_size'), "x_label"))
+        if not (y_label := kwargs.get('y_label')):
+            y_label = kwargs.get('y') if kwargs.get('y') else "count"
+        if y_label:
+            ax.set_ylabel(y_label, fontsize=resolve_fontsize(kwargs.get('y_label_size'), "y_label"))
 
-        # axis formats
-        def format_axis(ax, which: str = 'y', fmt: Optional[str] = None, decimals: int = 0):
-            """Format a given axis according to the specified style."""
-            if fmt is None:
-                return
+        tick_size = resolve_fontsize(kwargs.get('tick_size'), "tick")
+        ax.tick_params(axis='both', labelsize=tick_size)
 
+        # Axis limits
+        if kwargs.get('x_min') is not None or kwargs.get('x_max') is not None:
+            ax.set_xlim(kwargs.get('x_min'), kwargs.get('x_max'))
+        if kwargs.get('y_min') is not None or kwargs.get('y_max') is not None:
+            ax.set_ylim(kwargs.get('y_min'), kwargs.get('y_max'))
+            
+        # Axis formatting
+        def format_axis(ax, which, fmt, decimals):
             axis = ax.xaxis if which == 'x' else ax.yaxis
-
             if fmt == 'percent':
                 axis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=decimals))
             elif fmt == 'comma':
                 axis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: f"{int(x):,}"))
             elif fmt == 'short':
                 def short(x, pos):
-                    x = float(x)
                     if abs(x) >= 1_000_000:
                         return f"{x/1_000_000:.{decimals}f}M"
                     if abs(x) >= 1_000:
@@ -248,35 +612,45 @@ def common_args(func: Callable) -> Callable:
                     return f"{x:.{decimals}f}"
                 axis.set_major_formatter(mticker.FuncFormatter(short))
 
-        x_axis_format = kwargs.get('x_axis_format')
-        decimals = kwargs.get('decimals')
-        if x_axis_format:
-            format_axis(ax, which='x', fmt=x_axis_format, decimals=decimals)
-        y_axis_format = kwargs.get('y_axis_format')
-        if y_axis_format:
-            format_axis(ax, which='y', fmt=y_axis_format, decimals=decimals)
-        if hasattr(ax, "set_rotation"):
-            xtick_rotation = kwargs.get('xtick_rotation')
-            if xtick_rotation is not None:
-                for label in ax.get_xticklabels():
-                    label.set_rotation(xtick_rotation)
-            ytick_rotation = kwargs.get('ytick_rotation')
-            if ytick_rotation is not None:
-                for label in ax.get_yticklabels():
-                    label.set_rotation(ytick_rotation)
+        if kwargs.get('x_axis_format'):
+            format_axis(ax, 'x', kwargs['x_axis_format'], kwargs.get('decimals', 0))
+        if kwargs.get('y_axis_format'):
+            format_axis(ax, 'y', kwargs['y_axis_format'], kwargs.get('decimals', 0))
 
-        # legend
-        
-        show_legend = kwargs.get('show_legend')
-        if show_legend and hasattr(ax, "legend"):
-            legend_loc = kwargs.get('legend_loc')
-            ax.legend(loc=legend_loc if legend_loc else "best")
+        if kwargs.get('xtick_rotation') is not None:
+            for label in ax.get_xticklabels():
+                label.set_rotation(kwargs['xtick_rotation'])
+        if kwargs.get('ytick_rotation') is not None:
+            for label in ax.get_yticklabels():
+                label.set_rotation(kwargs['ytick_rotation'])
 
-        # grid
+        # Legend handling
+        if kwargs.get('legend') is not None:
+            preset = LEGEND_PRESETS[kwargs.get('legend', None)] 
+            if preset:
+                # if kwargs['legend'] == 'bottom':
+                #     ncol = len(ax.get_legend_handles_labels()[1])
+                # else:
+                #     ncol = 1
+                # leg = ax.legend(
+                #     loc=preset["loc"],
+                #     bbox_to_anchor=preset["bbox_to_anchor"],
+                #     ncol=ncol
+                # )
+                #_auto_adjust_for_legend(fig, ax, leg, kwargs['legend'])
+                _auto_adjust_for_legend(fig, ax, kwargs.get('legend')) #leg, kwargs['legend'])
         
-        show_grid = kwargs.get('show_grid')
-        if show_grid and hasattr(ax, "grid"):
-            ax.grid(True, linestyle='--', alpha=0.4)
+        # Grid
+        grid_x = kwargs.get('grid_x', False)
+        grid_y = kwargs.get('grid_y', True)
+        if grid_x:
+            ax.grid(True, axis='x', linestyle='--', alpha=0.4)
+        else:
+            ax.grid(False, axis='x')
+        if grid_y:
+            ax.grid(True, axis='y', linestyle='--', alpha=0.4)
+        else:
+            ax.grid(False, axis='y')
 
         return fig, ax
     return wrapper
@@ -372,6 +746,10 @@ class ChartMonkey:
                 - If group_by is provided: pivot table with x as index, group_by categories as columns.
                 - If group_by is None: aggregated dataframe with x and aggregated y.
         """
+
+        #logger.debug(f"Aggregating data with x='{x}', y='{y}', group_by='{group_by}', aggfunc={aggfunc}")
+        #logger.debug(f"Data shape before aggregation: {data.shape}")
+        
         # Defensive copy to avoid modifying caller's dataframe
         df = data.copy()
 
@@ -403,7 +781,39 @@ class ChartMonkey:
         else:
             grouped = df.groupby(x, as_index=False, observed=True)[y].agg(aggfunc)
 
+        #logger.debug(f"Grouped data shape: {grouped.shape}")
+        #logger.debug(f"Grouped head:\n{grouped.head()}")
+
         return grouped
+    
+    def _intuitive_sorting(self, data, x, group_by, sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending):
+        """
+        Decide default sorting columns for plotting if none are given, using data types. Intuitively
+         - numeric variables are sorted in ascending order by label (e.g. successive finanical years)
+         - categorical variables are sorted in descending order by values (e.g. count of records by status)
+
+        Returns:
+            sort_x (str), sort_group_by (str), sort_x_ascending (bool), sort_group_by_ascending (bool)
+        """
+
+        #logger.debug(f"Sorting decision for x='{x}' group_by='{group_by}'")
+        #logger.debug(f"Initial sort_x={sort_x}, sort_x_ascending={sort_x_ascending}, "f"sort_group_by={sort_group_by}, sort_group_by_ascending={sort_group_by_ascending}")
+        
+        numeric_x = (pd.api.types.is_numeric_dtype(data[x]) or pd.api.types.is_datetime64_any_dtype(data[x]))
+        if not sort_x:
+            sort_x = 'label' if numeric_x else 'values'
+        if not sort_x_ascending:
+            sort_x_ascending = True if numeric_x else False
+            
+        numeric_group_by = (pd.api.types.is_numeric_dtype(data[group_by]) or pd.api.types.is_datetime64_any_dtype(data[group_by]))
+        if not sort_group_by:
+            sort_group_by = 'label' if numeric_group_by else 'values'
+        if not sort_group_by_ascending:
+            sort_group_by_ascending = True if numeric_group_by else False
+
+        #logger.debug(f"Final sort_x={sort_x}, sort_x_ascending={sort_x_ascending}, "f"sort_group_by={sort_group_by}, sort_group_by_ascending={sort_group_by_ascending}")
+
+        return sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending
 
     @show_chart
     @sticky_args
@@ -416,10 +826,10 @@ class ChartMonkey:
         group_by: Optional[str] = None,
         aggfunc: Union[str, Callable] = "sum",
         stacking: str = "none",
-        sort_x_by: str = "value",
-        sort_group_by: str = "label",
-        sort_x_desc: bool = True,
-        sort_group_desc: bool = True,
+        sort_x: Optional[str] = None,
+        sort_group_by: Optional[str] = None,
+        sort_x_ascending: Optional[bool] = None,
+        sort_group_by_ascending: Optional[bool] = None,
         **kwargs: CommonArgsArgs
     ):
         """
@@ -436,47 +846,45 @@ class ChartMonkey:
                 - 'none' (side-by-side bars)
                 - 'standard' (stacked bars)
                 - 'proportion' (100% stacked bars)
-            sort_x_by (str, default 'value'): How to sort x-axis categories.
+            sort_x (str, optional): How to sort x-axis categories. Attempts to sort intuitively by default.
                 One of: 'label', 'value', 'none'.
-            sort_group_by (str, default 'label'): How to sort group_by categories.
+            sort_group_by (str, optional): How to sort group_by categories. Attempts to sort intuitively by default
                 One of: 'label', 'value', 'none'.
-            sort_x_desc (bool, default True): Whether to sort x-axis categories in descending order.
-            sort_group_desc (bool, default True): Whether to sort group_by categories in descending order.
+            sort_x_ascending (bool, optional): Whether to sort x-axis categories in ascending order. Attempts to sort intuitively by default.
+            sort_group_by_ascending (bool, optional): Whether to sort group_by categories in descending order. Attempts to sort intuitively by default.
             **kwargs: Additional common_args customisation (title, label, axis limit, etc.)
 
         Returns:
             (fig, ax): Matplotlib Figure and Axes objects (unless show_fig=True, then returns None).
         """
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots() #constrained_layout=True)
 
         if stacking not in {"none", "standard", "proportion"}:
             raise ValueError("stacking must be one of: 'none', 'standard', 'proportion'")
-        if sort_x_by not in {"none", "label", "value"}:
-            raise ValueError("sort_x_by must be one of: 'none', 'label', 'value'")
-        if sort_group_by not in {"none", "label", "value"}:
-            raise ValueError("sort_group_by must be one of: 'none', 'label', 'value'")
 
         # Aggregate data
-
         grouped = self._aggregate_data(data, x, y, group_by, aggfunc)
 
-        # Sorting
+        # Determine sorting
+        sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending = self._intuitive_sorting(data, x, group_by, sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending)
+
         if group_by:
             # Sort columns (group_by categories)
             if sort_group_by == "label":
-                grouped = grouped[sorted(grouped.columns, reverse=sort_group_desc)]
+                grouped = grouped[sorted(grouped.columns, reverse=not sort_group_by_ascending)]
             elif sort_group_by == "value":
                 col_sums = grouped.sum(axis=0)
-                sorted_cols = col_sums.sort_values(ascending=not sort_group_desc).index.tolist()
+                sorted_cols = col_sums.sort_values(ascending=sort_group_by_ascending).index.tolist()
                 grouped = grouped[sorted_cols]
 
             # Sort index (x categories)
-            if sort_x_by == "label":
-                grouped = grouped.sort_index(ascending=not sort_x_desc)
-            elif sort_x_by == "value":
+            if sort_x == "label":
+                grouped = grouped.sort_index(ascending=sort_x_ascending)
+            elif sort_x == "value":
                 idx_sums = grouped.sum(axis=1)
-                grouped = grouped.loc[idx_sums.sort_values(ascending=not sort_x_desc).index]
+                logger.debug(f"Index sums used for sorting: {idx_sums.to_dict()}")
+                grouped = grouped.loc[idx_sums.sort_values(ascending=sort_x_ascending).index]
 
             # 100% stacked proportions
             if stacking == "proportion":
@@ -485,10 +893,10 @@ class ChartMonkey:
             grouped.plot(kind="bar", stacked=stacking != "none", ax=ax)
 
         else:
-            if sort_x_by == "label":
-                grouped = grouped.sort_values(by=x, ascending=not sort_x_desc)
-            elif sort_x_by == "value":
-                grouped = grouped.sort_values(by=y if y else "count", ascending=not sort_x_desc)
+            if sort_x == "label":
+                grouped = grouped.sort_values(by=x, ascending=sort_x_ascending)
+            elif sort_x == "value":
+                grouped = grouped.sort_values(by=y if y else "count", ascending=sort_x_ascending)
 
             grouped.plot(kind="bar", x=x, y=(y if y else "count"), ax=ax)
 
