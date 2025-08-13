@@ -3,9 +3,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib import rcParams
+from matplotlib.font_manager import FontProperties
 from .colors import DEFAULT_PALETTE, COLORBLIND_PALETTE
 from functools import wraps
 import collections.abc
+from textwrap import wrap
+from math import ceil
 
 # Logging
 from lazychart.log import create_logger
@@ -143,393 +147,66 @@ def common_args(func: Callable) -> Callable:
         "x-large":  {"title": 24, "subtitle": 20, "x_label": 18, "y_label": 18, "tick": 14},
     }
 
-    LEGEND_PRESETS = {
-        "right":   {"loc": "center left", "bbox_to_anchor": (1.0, 0.5)},
-        "bottom":  {"loc": "upper center", "bbox_to_anchor": (0.5, -0)},
-        #"overlap": {"loc": "best", "bbox_to_anchor": None},
-    }
+    def legend_handle_and_padding_width(fig):
+        """Derive figures to help split legend between text and non-text components for wrapping purposes"""
+        fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
+        dpi = fig.dpi
+        # Convert "em" units to points → pixels
+        em_to_px = fontsize * dpi / 72.0
 
-    # def _auto_adjust_for_legend(fig, ax, legend, padding=0.02):
-    #     """Expand figure size to accomodate legends placed right/bottom (outside the axes).
-    #     matplotlib's tight_layout() and plt.subplots(constrained_layout=True) options seem to struggle with this.
-    #     """
+        handle_px = rcParams['legend.handlelength'] * em_to_px
+        pad_px = rcParams['legend.handletextpad'] * em_to_px
+        return handle_px + pad_px
 
-    #     logger.debug(f'attempt to _auto_adjust_for_legend {legend}')
-    #     if legend == 'bottom': # horizontal list
-    #         ncol = len(ax.get_legend_handles_labels()[1])
-    #     else:
-    #         ncol = 1 # vertical list
+    def legend_ncol(fig, ax, max_ratio=0.9):
+        """Rough calculation of number of categories to display on each line of a legend placed at the bottom."""
 
-    #     width, height = fig.get_size_inches()
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     logger.debug("Before initial legend: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #     )
+        fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
+        dpi = fig.dpi
+        char_px = fontsize * dpi / 72.0 * 0.6  # 0.6 is approx width/height ratio of a character
 
-    #     # add legend at random location
-    #     leg = ax.legend(loc='lower left', ncol=ncol)
-
-    #     # compute layout
-    #     fig.canvas.draw()
-
-    #     # get legend bbox in figure coordinates
-    #     width, height = fig.get_size_inches()
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
-    #     logger.debug("After initial legend: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #     )
-
-    #     # remove legend and add another with updated bbox_to_anchor value
-    #     leg.remove()
-    #     if legend == 'bottom':
-    #         leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0 - (bbox.height + padding)), ncol=ncol)
-    #     elif legend == 'right':
-    #         leg = ax.legend(loc='center left', bbox_to_anchor=(1 + (bbox.width + padding), 0.5), ncol=ncol)
-
-    #     width, height = fig.get_size_inches()
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
-    #     logger.debug("After revised legend: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #     )
+        _, labels = ax.get_legend_handles_labels()
+        handle_pad_px = legend_handle_and_padding_width(fig)
         
-    #     # compute layout - is this necessary?
-    #     fig.canvas.draw()
-        
-    #     width, height = fig.get_size_inches()
-        
-    #     # If legend extends past right side
-    #     if bbox.x1 > 1:
-    #         extra_width = bbox.x1 - 1
-    #         fig.set_size_inches(width * (1 + extra_width), height)
+        text_widths = [len(lbl) * char_px + handle_pad_px for lbl in labels]
+        avg_width = sum(text_widths) / len(text_widths)
 
-    #     # If legend extends below the bottom
-    #     if bbox.y0 < 0:
-    #         extra_height = abs(bbox.y0)
-    #         fig.set_size_inches(width, height * (1 + extra_height))
+        fig_width_px = fig.get_size_inches()[0] * fig.dpi
+        max_width_px = fig_width_px * max_ratio
 
-    #         pos = ax.get_position()
-    #         new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
-    #         ax.set_position(new_pos)
-
-    #         logger.debug(f"adjusting size due to extra_height {extra_height} on bottom")
-
-    #     # If legend extends above the top (e.g., large right-side legend)
-    #     if bbox.y1 > 1:
-    #         extra_height = bbox.y1 - 1
-    #         fig.set_size_inches(width, height * (1 + extra_height))
-
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     logger.debug("After resizing: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #     )
-
-        
-        # leg = ax.legend(loc=legend_pos, bbox_to_anchor=preset["bbox_to_anchor"], ncol=ncol
-        #         )
-        
-        
-        # width, height = fig.get_size_inches()
-        # ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
-
-
-        # if legend_pos == 'bottom':
-
-        #     # increase height by the legend's bbox height plus a padding fraction
-        #     extra_height = (bbox.y1 - bbox.y0) * (1 + padding)
-        #     fig.set_size_inches(width, height * (1 + extra_height))
-
-        #     # Move axes up by extra_height fraction and shrink height accordingly
-        #     pos = ax.get_position()
-        #     new_y0 = pos.y0 + extra_height
-        #     new_height = pos.height - extra_height
-        #     ax.set_position([pos.x0, new_y0, pos.width, new_height])
-        #     logger.debug(f"Adjusted for bottom legend: extra_height={extra_height}")
-
-        # elif legend_pos == 'right':
-            
-        #     # increase width by legend's bbox width plus padding
-        #     extra_width = (bbox.x1 - bbox.x0) * (1 + padding)
-        #     fig.set_size_inches(width * (1 + extra_width), height)
-
-        #     # Optionally move/shrink axes horizontally if needed
-        #     pos = ax.get_position()
-        #     new_width = pos.width - extra_width
-        #     ax.set_position([pos.x0, pos.y0, new_width, pos.height])
-        #     logger.debug(f"Adjusted for right legend: extra_width={extra_width}")
-
-        # resized = False
-
-        # # Legend extends past right side
-        # if bbox.x1 > 1:
-        #     extra_width = bbox.x1 - 1
-        #     fig.set_size_inches(width * (1 + extra_width), height)
-        #     resized = True
-        #     logger.debug(f"adjusting size due to extra_width {extra_width} on right side")
-
-        # # Legend extends below bottom
-        # if bbox.y0 < 0:
-        #     extra_height = abs(bbox.y0)
-        #     fig.set_size_inches(width, height * (1 + extra_height))
-        #     logger.debug(f"adjusting size due to extra_height {extra_height} on bottom")
-        #     # Shift axes upward by this fraction to avoid overlap
-        #     pos = ax.get_position()
-        #     new_y0 = pos.y0 + extra_height
-        #     new_height = pos.height - extra_height
-        #     if new_height <= 0:
-        #         new_height = pos.height * 0.8  # fallback: shrink a bit
-        #     logger.debug(f"about to set using ax.set_position ax.get_position().bounds is {ax.get_position().bounds}")
-        #     ax.set_position([pos.x0, new_y0, pos.width, new_height])
-        #     logger.debug(f"finished setting using ax.set_position ax.get_position().bounds is {ax.get_position().bounds}")
-
-        #     resized = True
-
-        # # Legend extends above top (rare case)
-        # if bbox.y1 > 1:
-        #     extra_height = bbox.y1 - 1
-        #     fig.set_size_inches(width, height * (1 + extra_height))
-        #     resized = True
-
-        # #if resized:
-        #     #fig.tight_layout()
-
-        # width, height = fig.get_size_inches()
-        # ax_pos = ax.get_position().bounds
-        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
-        # logger.debug("After making changes: | "
-        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-        # )
-
-        #logger.debug(f"After: fig size=({width:.3f},{height:.3f}), ax_pos={ax_pos}, legend bbox=({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f})")
-
-    # def _auto_adjust_for_legend(fig, ax, legend, pad_fraction=0):
-    #     """
-    #     Expands figure size if legend is outside the plot area.
-    #     Uses tight_layout after resizing to avoid squished axes.
-    #     """
-
-    #     fig.canvas.draw()  # ensure layout is computed
-    #     width, height = fig.get_size_inches()
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
-    #     logger.debug("Before making changes: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #     )
-
-    #     # If legend extends past right side
-    #     if bbox.x1 > 1:
-    #         extra_width = bbox.x1 - 1
-    #         fig.set_size_inches(width * (1 + extra_width), height)
-
-    #     # If legend extends below the bottom
-    #     if bbox.y0 < 0:
-    #         extra_height = abs(bbox.y0)
-    #         fig.set_size_inches(width, height * (1 + extra_height))
-
-    #         pos = ax.get_position()
-    #         new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
-    #         ax.set_position(new_pos)
-
-    #     # If legend extends above the top (e.g., large right-side legend)
-    #     if bbox.y1 > 1:
-    #         extra_height = bbox.y1 - 1
-    #         fig.set_size_inches(width, height * (1 + extra_height))
-
-    #     width, height = fig.get_size_inches()
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
-    #     logger.debug("After making changes: | "
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #     )
-
-        # fig.canvas.draw()  # ensure layout is computed
-        # bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
-        # ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-
-        # width, height = fig.get_size_inches()
-        # extra_width = max(0, bbox.x1 - 1)
-        # extra_height_bottom = max(0, -bbox.y0)
-        # extra_height_top = max(0, bbox.y1 - 1)
-        # logger.debug("Before making changes: | "
-        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-        # )
-
-        # # Amount the legend sticks out beyond figure bounds
-        # extra_left = max(0, -bbox.x0)
-        # extra_right = max(0, bbox.x1 - 1)
-        # extra_bottom = max(0, -bbox.y0)
-        # extra_top = max(0, bbox.y1 - 1)
-
-        # logger.debug(
-        #     f"Extra L/R: {extra_left:.3f}/{extra_right:.3f}, Extra T/B: {extra_top:.3f}/{extra_bottom:.3f}"
-        # )
-
-        # # Additional padding
-        # extra_left += pad_fraction
-        # extra_right += pad_fraction
-        # extra_bottom += pad_fraction
-        # extra_top += pad_fraction
-
-        # # Expand figure size
-        # new_width = width * (1 + extra_left + extra_right)
-        # new_height = height * (1 + extra_top + extra_bottom)
-
-        # if new_width > width or new_height > height:
-        #     fig.set_size_inches(new_width, new_height)
-        #     #fig.tight_layout()  # let Matplotlib handle repositioning
-
-        # logger.debug("After making changes: | "
-        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-        # )
-
-        # if new_width > width or new_height > height:
-        #     #fig.set_size_inches(new_width, new_height)
-        #     fig.tight_layout()  # let Matplotlib handle repositioning
-
-        # logger.debug("After making changes and after tight_layout(): | "
-        #     f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-        #     f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-        #     f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-        # )
-
-    # def _auto_adjust_for_legend(fig, ax, legend):
-    #     """Expand figure size if legend is outside the visible area."""
-    #     fig.canvas.draw()  # ensure layout is computed
-    #     bbox = legend.get_window_extent()
-    #     inv = fig.transFigure.inverted()
-    #     legend_bbox = bbox.transformed(inv)
-
-    #     width, height = fig.get_size_inches()
-
-    #     # If legend extends past right side
-    #     if legend_bbox.x1 > 1:
-    #         extra_width = legend_bbox.x1 - 1
-    #         fig.set_size_inches(width * (1 + extra_width), height)
-
-    #     # If legend extends below the bottom
-    #     if legend_bbox.y0 < 0:
-    #         extra_height = abs(legend_bbox.y0)
-    #         fig.set_size_inches(width, height * (1 + extra_height))
-
-    #     # If legend extends above the top (e.g., large right-side legend)
-    #     if legend_bbox.y1 > 1:
-    #         extra_height = legend_bbox.y1 - 1
-    #         fig.set_size_inches(width, height * (1 + extra_height))
-
-    #     # Use logging to see what is going on
-    #     ax_pos = ax.get_position().bounds  # returns (x0, y0, width, height) in fig coords
-    #     extra_width = max(0, bbox.x1 - 1)
-    #     extra_height_bottom = max(0, -bbox.y0)
-    #     extra_height_top = max(0, bbox.y1 - 1)
-    #     logger.debug(
-    #         f"Figure size (in): [{width:.3f}, {height:.3f}] | "
-    #         f"Axes pos: ({ax_pos[0]:.3f}, {ax_pos[1]:.3f}, {ax_pos[2]:.3f}, {ax_pos[3]:.3f}) | "
-    #         f"Legend bbox: ({bbox.x0:.3f}, {bbox.y0:.3f}, {bbox.x1:.3f}, {bbox.y1:.3f}) | "
-    #         f"Extra W: {extra_width:.3f}, Extra H bottom: {extra_height_bottom:.3f}, Extra H top: {extra_height_top:.3f}"
-    #     )
-
-    def _auto_adjust_for_legend(fig, ax, legend_pos, padding=0.02):
+        ideal_ncol = int(max_width_px // avg_width) # maximum columns that could fit on one line
+        rows = ceil(len(labels) / ideal_ncol) # minimum rows required to acocmodate all labels
+        ncol = ceil(len(labels) / rows) # balance labels evenly between rows
+        ncol = max(1, min(len(labels), ncol)) # ensure >0 and <= number of labels
+        return ncol
+    
+    def legend_wrap(fig, labels, max_ratio=0.3):
         """
-        Adjust figure size and axes position to accommodate legends placed
-        outside the axes on the right or bottom.
-
-        Parameters:
-            fig: matplotlib.figure.Figure
-            ax: matplotlib.axes.Axes
-            legend_pos: str, either 'bottom' or 'right'
-            padding: float, extra padding in figure fraction units
-        
-        This function places a temporary legend, measures its bbox,
-        then resizes the figure and repositions the axes to make room.
+        Automatically wraps legend labels so they fit within max_ratio of figure width.
+        max_ratio is the total fraction of figure width allocated to each legend entry 
+        (including handle + padding). 
         """
+        # Figure and font settings
+        fig_width_px = fig.get_size_inches()[0] * fig.dpi
+        fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
+        dpi = fig.dpi
 
-        # Determine number of columns for legend
-        handles, labels = ax.get_legend_handles_labels()
-        ncol = len(labels) if legend_pos == 'bottom' else 1
+        # Approximate character width in pixels
+        char_px = fontsize * dpi / 72.0 * 0.6
 
-        # Step 1: Add a temporary legend at initial "outside" position
-        if legend_pos == 'bottom':
-            leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0), ncol=ncol)
-        elif legend_pos == 'right':
-            leg = ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), ncol=ncol)
-        else:
-            raise ValueError("legend_pos must be 'bottom' or 'right'")
+        # Available text width after handle + padding
+        handle_pad_px = legend_handle_and_padding_width(fig)
+        max_label_px = fig_width_px * max_ratio - handle_pad_px
 
-        fig.canvas.draw()  # Needed to compute bbox
+        # Convert to max characters allowed
+        max_chars = int(max_label_px // char_px)
 
-        # Step 2: Get legend bounding box in figure coords
-        bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
-        width, height = fig.get_size_inches()
-        pos = ax.get_position()
+        # If all labels already fit, return unchanged
+        if max(len(lbl) for lbl in labels) <= max_chars:
+            return labels
 
-        # Remove the temporary legend before adding adjusted one
-        leg.remove()
-
-        # Step 3: Calculate needed expansion and adjust figure & axes
-
-        if legend_pos == 'bottom':
-            # Legend extends below the axes, check if y0 < 0
-            extra_height = max(0, -bbox.y0 + padding)
-
-            if extra_height > 0:
-                # Increase figure height
-                new_height = height * (1 + extra_height)
-                fig.set_size_inches(width, new_height)
-
-                # Shift axes up and reduce height accordingly
-                new_pos = [pos.x0, pos.y0 + extra_height, pos.width, pos.height - extra_height]
-                ax.set_position(new_pos)
-
-                # Adjust subplot bottom margin to not cut off axes labels
-                fig.subplots_adjust(bottom=pos.y0 + extra_height + padding)
-
-            # Re-add legend with adjusted bbox_to_anchor to sit below axes
-            leg = ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0 - extra_height), ncol=ncol)
-
-        elif legend_pos == 'right':
-            # Legend extends beyond right, check if x1 > 1
-            extra_width = max(0, bbox.x1 - 1 + padding)
-
-            if extra_width > 0:
-                # Increase figure width
-                new_width = width * (1 + extra_width)
-                fig.set_size_inches(new_width, height)
-
-                # Shrink axes width to make room for legend
-                new_pos = [pos.x0, pos.y0, pos.width - extra_width, pos.height]
-                ax.set_position(new_pos)
-
-                # Adjust subplot right margin to prevent clipping
-                fig.subplots_adjust(right=pos.x0 + pos.width - extra_width - padding)
-
-            # Re-add legend with adjusted bbox_to_anchor to sit right of axes
-            leg = ax.legend(loc='center left', bbox_to_anchor=(1 + extra_width, 0.5), ncol=ncol)
-
-        fig.canvas.draw()  # Redraw with new layout
-
-        # Debug info (optional)
-        # bbox = leg.get_window_extent().transformed(fig.transFigure.inverted())
-        # ax_pos = ax.get_position().bounds
-        # print(f"Figure size: {fig.get_size_inches()}, Axes pos: {ax_pos}, Legend bbox: {bbox}")
+        # Otherwise wrap
+        return ['\n'.join(wrap(lbl, max_chars)) for lbl in labels]
     
     @wraps(func)
     def wrapper(self, *args, **kwargs):
@@ -624,21 +301,18 @@ def common_args(func: Callable) -> Callable:
             for label in ax.get_yticklabels():
                 label.set_rotation(kwargs['ytick_rotation'])
 
-        # Legend handling
-        if kwargs.get('legend') is not None:
-            preset = LEGEND_PRESETS[kwargs.get('legend', None)] 
-            if preset:
-                # if kwargs['legend'] == 'bottom':
-                #     ncol = len(ax.get_legend_handles_labels()[1])
-                # else:
-                #     ncol = 1
-                # leg = ax.legend(
-                #     loc=preset["loc"],
-                #     bbox_to_anchor=preset["bbox_to_anchor"],
-                #     ncol=ncol
-                # )
-                #_auto_adjust_for_legend(fig, ax, leg, kwargs['legend'])
-                _auto_adjust_for_legend(fig, ax, kwargs.get('legend')) #leg, kwargs['legend'])
+        # Legend handling - designed for single axes, may need to adjust for subplot_mosaic combo charts
+        if kwargs.get('group_by'):
+            ax.legend_.remove()  # Removes auto-added legend if it exists
+            if kwargs.get('legend', None) == 'bottom':
+                ncol = legend_ncol(fig, ax)
+                fig.legend(loc='outside lower center', ncol=ncol, title=kwargs.get('group_by'))
+            elif kwargs.get('legend', None) == 'right':
+                handles, labels = ax.get_legend_handles_labels()
+                wrapped_labels = legend_wrap(fig, labels)
+                fig.legend(handles, wrapped_labels, loc='outside right upper', title=kwargs.get('group_by'))
+            else:
+                fig.legend(title=kwargs.get('group_by'))
         
         # Grid
         grid_x = kwargs.get('grid_x', False)
@@ -858,7 +532,7 @@ class ChartMonkey:
             (fig, ax): Matplotlib Figure and Axes objects (unless show_fig=True, then returns None).
         """
 
-        fig, ax = plt.subplots() #constrained_layout=True)
+        fig, ax = plt.subplots(constrained_layout=True)
 
         if stacking not in {"none", "standard", "proportion"}:
             raise ValueError("stacking must be one of: 'none', 'standard', 'proportion'")
@@ -898,6 +572,6 @@ class ChartMonkey:
             elif sort_x == "value":
                 grouped = grouped.sort_values(by=y if y else "count", ascending=sort_x_ascending)
 
-            grouped.plot(kind="bar", x=x, y=(y if y else "count"), ax=ax)
+            grouped.plot(kind="bar", x=x, y=(y if y else "count"), ax=ax, legend=False) # handle legend at the common_args figure level
 
         return fig, ax
