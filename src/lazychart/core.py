@@ -1,3 +1,6 @@
+"""lazychart is a lightweight Python helper to rapidly generate static plots from pandas DataFrames.
+It features sensible defaults and the option to use *sticky* parameters — it can remember previous arguments
+(like data, variables and axis labels) so you can churn out similar charts quickly without repeating boilerplate."""
 from typing import TypedDict, Optional, Union, Iterable, Dict, Any, Callable
 import numpy as np
 import pandas as pd
@@ -8,6 +11,7 @@ from matplotlib.font_manager import FontProperties
 from .colors import DEFAULT_PALETTE, COLORBLIND_PALETTE
 from functools import wraps
 import collections.abc
+from collections.abc import Sequence
 from textwrap import wrap
 from math import ceil
 
@@ -139,14 +143,7 @@ def common_args(func: Callable) -> Callable:
             presets: right, bottom, overlap, hide
           - grid_x, grid_y (bool): whether to show gridlines (default: hide x, show y)
     """
-
-    FONT_PRESETS = {
-        "small":    {"title": 12, "subtitle": 11, "x_label": 10, "y_label": 10, "tick": 9},
-        "medium":   {"title": 16, "subtitle": 14, "x_label": 12, "y_label": 12, "tick": 10},
-        "large":    {"title": 20, "subtitle": 18, "x_label": 16, "y_label": 16, "tick": 12},
-        "x-large":  {"title": 24, "subtitle": 20, "x_label": 18, "y_label": 18, "tick": 14},
-    }
-
+    
     def legend_handle_and_padding_width(fig):
         """Derive figures to help split legend between text and non-text components for wrapping purposes"""
         fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
@@ -158,27 +155,33 @@ def common_args(func: Callable) -> Callable:
         pad_px = rcParams['legend.handletextpad'] * em_to_px
         return handle_px + pad_px
 
-    def legend_ncol(fig, ax, max_ratio=0.9):
-        """Rough calculation of number of categories to display on each line of a legend placed at the bottom."""
-
+    def legend_ncol(fig, ax, legend, max_ratio=0.9):
         fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
         dpi = fig.dpi
-        char_px = fontsize * dpi / 72.0 * 0.6  # 0.6 is approx width/height ratio of a character
-
+        char_px = fontsize * dpi / 72.0 * 0.6
         _, labels = ax.get_legend_handles_labels()
         handle_pad_px = legend_handle_and_padding_width(fig)
-        
-        text_widths = [len(lbl) * char_px + handle_pad_px for lbl in labels]
-        avg_width = sum(text_widths) / len(text_widths)
+        text_heights = [fontsize * dpi / 72.0 * 1.2 for _ in labels]  # approx height per label in px
 
-        fig_width_px = fig.get_size_inches()[0] * fig.dpi
-        max_width_px = fig_width_px * max_ratio
-
-        ideal_ncol = int(max_width_px // avg_width) # maximum columns that could fit on one line
-        rows = ceil(len(labels) / ideal_ncol) # minimum rows required to acocmodate all labels
-        ncol = ceil(len(labels) / rows) # balance labels evenly between rows
-        ncol = max(1, min(len(labels), ncol)) # ensure >0 and <= number of labels
-        return ncol
+        if legend == 'bottom':
+            fig_width_px = fig.get_size_inches()[0] * fig.dpi # use width
+            max_width_px = fig_width_px * max_ratio
+            text_widths = [len(lbl) * char_px + handle_pad_px for lbl in labels]
+            avg_width = sum(text_widths) / len(text_widths)
+            ideal_ncol = max(1, int(max_width_px // avg_width))
+            rows = ceil(len(labels) / ideal_ncol)
+            ncol = ceil(len(labels) / rows)
+            return max(1, min(len(labels), ncol))
+        else:
+            fig_height_px = fig.get_size_inches()[1] * fig.dpi # use height
+            max_height_px = fig_height_px * max_ratio
+            avg_label_h = sum(text_heights) / len(text_heights)
+            max_rows = max(1, int(max_height_px // avg_label_h))
+            if max_rows >= len(labels):
+                return 1
+            else:
+                ncol = ceil(len(labels) / max_rows)
+                return max(1, min(len(labels), ncol))
     
     def legend_wrap(fig, labels, max_ratio=0.3):
         """
@@ -244,6 +247,14 @@ def common_args(func: Callable) -> Callable:
         ## Customise appearance
 
         # Labels
+
+        FONT_PRESETS = {
+            "small":    {"title": 12, "subtitle": 11, "x_label": 10, "y_label": 10, "tick": 9},
+            "medium":   {"title": 16, "subtitle": 14, "x_label": 12, "y_label": 12, "tick": 10},
+            "large":    {"title": 20, "subtitle": 18, "x_label": 16, "y_label": 16, "tick": 12},
+            "x-large":  {"title": 24, "subtitle": 20, "x_label": 18, "y_label": 18, "tick": 14},
+        }
+
         def resolve_fontsize(val, category):
             if isinstance(val, int):
                 return val
@@ -254,13 +265,14 @@ def common_args(func: Callable) -> Callable:
             return FONT_PRESETS["medium"][category]
 
         if (title := kwargs.get('title')):
-            ax.set_title(title, fontsize=resolve_fontsize(kwargs.get('title_size'), "title"))
+            #ax.set_title(title, fontsize=resolve_fontsize(kwargs.get('title_size'), "title"))
+            fig.suptitle(title, fontsize=resolve_fontsize(kwargs.get('title_size'), "title")) # doesn't seem to work
         if (subtitle := kwargs.get('subtitle')) and hasattr(ax, "set_subtitle"):
             ax.set_subtitle(subtitle, fontsize=resolve_fontsize(kwargs.get('subtitle_size'), "subtitle"))
         if (x_label := kwargs.get('x_label')):
             ax.set_xlabel(x_label, fontsize=resolve_fontsize(kwargs.get('x_label_size'), "x_label"))
         if not (y_label := kwargs.get('y_label')):
-            y_label = kwargs.get('y') if kwargs.get('y') else "count"
+            y_label = kwargs.get('y') if kwargs.get('y') else "Number of rows in dataset"
         if y_label:
             ax.set_ylabel(y_label, fontsize=resolve_fontsize(kwargs.get('y_label_size'), "y_label"))
 
@@ -305,12 +317,14 @@ def common_args(func: Callable) -> Callable:
         if kwargs.get('group_by'):
             ax.legend_.remove()  # Removes auto-added legend if it exists
             if kwargs.get('legend', None) == 'bottom':
-                ncol = legend_ncol(fig, ax)
+                ncol = legend_ncol(fig, ax, 'bottom')
                 fig.legend(loc='outside lower center', ncol=ncol, title=kwargs.get('group_by'))
             elif kwargs.get('legend', None) == 'right':
                 handles, labels = ax.get_legend_handles_labels()
                 wrapped_labels = legend_wrap(fig, labels)
-                fig.legend(handles, wrapped_labels, loc='outside right upper', title=kwargs.get('group_by'))
+                ncol = legend_ncol(fig, ax, 'right')
+                fig.legend(handles, wrapped_labels, ncol=ncol, loc='outside right upper', title=kwargs.get('group_by'))
+                # TODO(test): fig.legend(handles, wrapped_labels, loc='center left', bbox_to_anchor=(1.02, 0.5), title=kwargs.get('group_by'))
             else:
                 fig.legend(title=kwargs.get('group_by'))
         
@@ -402,7 +416,8 @@ class ChartMonkey:
         x: str,
         y: Optional[str] = None,
         group_by: Optional[str] = None,
-        aggfunc: Union[str, Callable] = "sum"
+        aggfunc: Union[str, Callable] = "sum",
+        x_period: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Aggregate data for charting, mimicking behaviour of tools like Excel or Power BI.
@@ -414,6 +429,9 @@ class ChartMonkey:
             group_by (str, optional): Column name for subgrouping within each x category.
             aggfunc (str or callable, default 'sum'): Aggregation function to apply.
                 Examples: 'sum', 'mean', 'count', 'median', np.sum, np.mean, etc.
+            x_period (str, optional). One of: 'month', 'quarter', 'year', 'week', 'day'.
+                  If provided, the function will create a temporary period column
+                  from the datetime column named by `x` and aggregate by that period.
 
         Returns:
             pd.DataFrame:
@@ -426,6 +444,23 @@ class ChartMonkey:
         
         # Defensive copy to avoid modifying caller's dataframe
         df = data.copy()
+
+        # If x_period requested, ensure x is parsed as datetime and create temp column
+        if x_period:
+            if x_period.lower() not in {'month', 'quarter', 'year', 'week', 'day'}:
+                raise ValueError("x_period must be one of: 'month', 'quarter', 'year', 'week', 'day'")
+            # try to convert x to datetime if it isn't already
+            if not pd.api.types.is_datetime64_any_dtype(df[x]):
+                df[x] = pd.to_datetime(df[x], errors='coerce')
+            if df[x].isna().any():
+                raise ValueError(f"Column '{x}' contains values that cannot be parsed as datetimes.")
+            # map to period string
+            period_map = {'month': 'M', 'quarter': 'Q', 'year': 'Y', 'week': 'W', 'day': 'D'}
+            period_freq = period_map[x_period.lower()]
+            tmp_x = f"{x} ({x_period})"
+            # use Period -> string to get consistent labels (e.g. '2023-05')
+            df[tmp_x] = df[x].dt.to_period(period_freq).astype(str)
+            x = tmp_x  # use the temp column from here on
 
         # Validate group_by
         if group_by:
@@ -460,34 +495,101 @@ class ChartMonkey:
 
         return grouped
     
-    def _intuitive_sorting(self, data, x, group_by, sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending):
+    def _resolve_sort_order(
+        self,
+        available,
+        grouped: Optional[pd.DataFrame] = None,
+        sort_hint: Optional[Union[str, Sequence]] = None,
+        is_index: bool = False,
+        ascending: Optional[bool] = None
+    ) -> list:
         """
-        Decide default sorting columns for plotting if none are given, using data types. Intuitively
-         - numeric variables are sorted in ascending order by label (e.g. successive finanical years)
-         - categorical variables are sorted in descending order by values (e.g. count of records by status)
+        Resolve ordering for a single axis (x or group_by).
 
+        Parameters
+        - available: iterable of labels currently present (e.g. list(grouped.index) or list(grouped.columns) or unique raw values)
+        - grouped: the aggregated/pivot DataFrame (optional). Required when sort_hint == 'value' to compute sums.
+        - sort_hint: None | 'label' | 'value' | 'none' | list_of_labels
+        - is_index: True if available corresponds to the DataFrame index (use sums axis=1 for 'value'), else columns (axis=0)
+        - ascending: optional boolean; if None we fall back to intuitive defaults:
+            - label => True for numeric-like (keep chronological), False for categorical (desc)
+            - value => False for categorical (desc), True for numeric-like (asc)
         Returns:
-            sort_x (str), sort_group_by (str), sort_x_ascending (bool), sort_group_by_ascending (bool)
+        - list: resolved ordering (subset/reorder of available)
         """
+        # Normalize available to list of strings (preserves original labels but cast to str for matching)
+        avail_list = [str(a) for a in list(available)]
 
-        #logger.debug(f"Sorting decision for x='{x}' group_by='{group_by}'")
-        #logger.debug(f"Initial sort_x={sort_x}, sort_x_ascending={sort_x_ascending}, "f"sort_group_by={sort_group_by}, sort_group_by_ascending={sort_group_by_ascending}")
-        
-        numeric_x = (pd.api.types.is_numeric_dtype(data[x]) or pd.api.types.is_datetime64_any_dtype(data[x]))
-        if not sort_x:
-            sort_x = 'label' if numeric_x else 'values'
-        if not sort_x_ascending:
-            sort_x_ascending = True if numeric_x else False
-            
-        numeric_group_by = (pd.api.types.is_numeric_dtype(data[group_by]) or pd.api.types.is_datetime64_any_dtype(data[group_by]))
-        if not sort_group_by:
-            sort_group_by = 'label' if numeric_group_by else 'values'
-        if not sort_group_by_ascending:
-            sort_group_by_ascending = True if numeric_group_by else False
+        # If explicit list provided, respect it (append any missing existing labels at the end)
+        if isinstance(sort_hint, Sequence) and not isinstance(sort_hint, (str, bytes)):
+            requested = [str(x) for x in list(sort_hint)]
+            requested_existing = [r for r in requested if r in avail_list]
+            missing_existing = [a for a in avail_list if a not in requested_existing]
+            return requested_existing + missing_existing
 
-        #logger.debug(f"Final sort_x={sort_x}, sort_x_ascending={sort_x_ascending}, "f"sort_group_by={sort_group_by}, sort_group_by_ascending={sort_group_by_ascending}")
+        # If user asked for no sorting, preserve natural available order
+        if sort_hint == 'none':
+            return avail_list
 
-        return sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending
+        # Decide numeric-like hint for default ascending behaviour (only if grouped provided, else conservative False)
+        numeric_like = False
+        if grouped is not None and len(avail_list) > 0:
+            try:
+                # Peek first element mapping back to grouped to check dtype only if possible
+                numeric_like = False
+                if is_index:
+                    # try to infer from grouped.index if it has dtype information
+                    try:
+                        idx = grouped.index
+                        numeric_like = pd.api.types.is_numeric_dtype(idx.dtype) or pd.api.types.is_datetime64_any_dtype(idx.dtype)
+                    except Exception:
+                        numeric_like = False
+                else:
+                    # infer from grouped columns or its first column values
+                    try:
+                        # if columns are strings, not helpful — fallback to values in grouped
+                        numeric_like = any(pd.api.types.is_numeric_dtype(grouped[c].dtype) for c in grouped.columns[:1])  # rough test
+                    except Exception:
+                        numeric_like = False
+            except Exception:
+                numeric_like = False
+
+        # Default ascending if not provided
+        if ascending is None:
+            if sort_hint == 'label':
+                ascending = True if numeric_like else False
+            elif sort_hint == 'value':
+                ascending = False if not numeric_like else True
+            else:
+                # fallback to label-like preference
+                ascending = True if numeric_like else False
+
+        # Sorting by label (alphabetical / chronological)
+        if sort_hint == 'label':
+            return sorted(avail_list, reverse=not ascending)
+
+        # Sorting by value: requires grouped DataFrame to compute sums
+        if sort_hint == 'value':
+            if grouped is None:
+                # no information to sort by value; fall back to available order
+                return avail_list
+            if is_index:
+                # grouped: rows are the x categories -> sum across columns to compare row totals
+                sums = grouped.sum(axis=1)
+                ordered = [str(i) for i in sums.sort_values(ascending=ascending).index.tolist()]
+                # ensure only available ones are returned (safety)
+                return [o for o in ordered if o in avail_list]
+            else:
+                # columns case: sum across rows for each column
+                try:
+                    col_sums = grouped.sum(axis=0)
+                    ordered = [str(c) for c in col_sums.sort_values(ascending=ascending).index.tolist()]
+                    return [o for o in ordered if o in avail_list]
+                except Exception:
+                    return avail_list
+
+        # Default case: preserve available order
+        return avail_list
 
     @show_chart
     @sticky_args
@@ -504,6 +606,7 @@ class ChartMonkey:
         sort_group_by: Optional[str] = None,
         sort_x_ascending: Optional[bool] = None,
         sort_group_by_ascending: Optional[bool] = None,
+        x_period: Optional[str] = None,
         **kwargs: CommonArgsArgs
     ):
         """
@@ -537,41 +640,92 @@ class ChartMonkey:
         if stacking not in {"none", "standard", "proportion"}:
             raise ValueError("stacking must be one of: 'none', 'standard', 'proportion'")
 
-        # Aggregate data
-        grouped = self._aggregate_data(data, x, y, group_by, aggfunc)
+        # Aggregate (this respects x_period if your _aggregate_data accepts it)
+        grouped = self._aggregate_data(data, x, y, group_by, aggfunc, x_period=x_period if 'x_period' in self._aggregate_data.__code__.co_varnames else None)
 
-        # Determine sorting
-        sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending = self._intuitive_sorting(data, x, group_by, sort_x, sort_group_by, sort_x_ascending, sort_group_by_ascending)
-
+        # If group_by provided, grouped is pivot-like (index = x, columns = group_by)
         if group_by:
-            # Sort columns (group_by categories)
-            if sort_group_by == "label":
-                grouped = grouped[sorted(grouped.columns, reverse=not sort_group_by_ascending)]
-            elif sort_group_by == "value":
-                col_sums = grouped.sum(axis=0)
-                sorted_cols = col_sums.sort_values(ascending=sort_group_by_ascending).index.tolist()
-                grouped = grouped[sorted_cols]
+            # Ensure columns/index are strings for consistent comparisons (we keep underlying values in grouped)
+            grouped.columns = grouped.columns.astype(str)
+            grouped.index = grouped.index.astype(str)
 
-            # Sort index (x categories)
-            if sort_x == "label":
-                grouped = grouped.sort_index(ascending=sort_x_ascending)
-            elif sort_x == "value":
-                idx_sums = grouped.sum(axis=1)
-                logger.debug(f"Index sums used for sorting: {idx_sums.to_dict()}")
-                grouped = grouped.loc[idx_sums.sort_values(ascending=sort_x_ascending).index]
-
-            # 100% stacked proportions
+            # 100% stacked proportions -> convert rows to proportions first (before sorting by value if needed)
             if stacking == "proportion":
-                grouped = grouped.div(grouped.sum(axis=1), axis=0)
+                # avoid division by zero
+                row_sums = grouped.sum(axis=1).replace({0: np.nan})
+                grouped = grouped.div(row_sums, axis=0).fillna(0)
 
-            grouped.plot(kind="bar", stacked=stacking != "none", ax=ax)
+            # Resolve ordering for group_by categories (columns)
+            cols_order = self._resolve_sort_order(
+                available=list(grouped.columns.astype(str)),
+                grouped=grouped,
+                sort_hint=sort_group_by,
+                is_index=False,
+                ascending=sort_group_by_ascending
+            )
+            # Reorder columns preserving only those that exist
+            cols_order = [c for c in cols_order if c in grouped.columns]
+            if cols_order:
+                grouped = grouped[cols_order]
+
+            # Resolve ordering for x categories (index)
+            idx_order = self._resolve_sort_order(
+                available=list(grouped.index.astype(str)),
+                grouped=grouped,
+                sort_hint=sort_x,
+                is_index=True,
+                ascending=sort_x_ascending
+            )
+            idx_order = [i for i in idx_order if i in grouped.index]
+            if idx_order:
+                grouped = grouped.loc[idx_order]
+
+            # Finally plot: stacked if stacking != 'none'
+            grouped.plot(kind="bar", stacked=(stacking != "none"), ax=ax)
 
         else:
-            if sort_x == "label":
-                grouped = grouped.sort_values(by=x, ascending=sort_x_ascending)
-            elif sort_x == "value":
-                grouped = grouped.sort_values(by=y if y else "count", ascending=sort_x_ascending)
+            # Non-grouped case: grouped is a DataFrame either with columns [x, 'count'] or aggregated with as_index=False
+            # Normalize column names: ensure x exists and values are present
+            if y is None:
+                value_col = "count"
+            else:
+                value_col = y
 
-            grouped.plot(kind="bar", x=x, y=(y if y else "count"), ax=ax, legend=False) # handle legend at the common_args figure level
+            # If grouped came back as a Series-like (size grouped), ensure it's a DataFrame with columns
+            if isinstance(grouped, pd.Series):
+                grouped = grouped.reset_index(name=value_col)
+
+            # Cast x column to string for explicit-list matching
+            grouped[x] = grouped[x].astype(str)
+
+            # Sorting when explicit list provided for sort_x
+            if isinstance(sort_x, Sequence) and not isinstance(sort_x, (str, bytes)):
+                requested = [str(s) for s in list(sort_x)]
+                requested_existing = [r for r in requested if r in grouped[x].unique()]
+                missing_existing = [a for a in grouped[x].unique() if a not in requested_existing]
+                explicit_order = requested_existing + missing_existing
+                # set index to x, reindex according to explicit order
+                grouped = grouped.set_index(x).reindex(explicit_order).reset_index()
+            else:
+                # Use helper to compute an ordering (value-based or label)
+                order = self._resolve_sort_order(
+                    available=list(grouped[x].astype(str).unique()),
+                    grouped=grouped.set_index(x) if value_col in grouped.columns else None,
+                    sort_hint=sort_x,
+                    is_index=False,
+                    ascending=sort_x_ascending
+                )
+                # If we got an ordering, reindex accordingly
+                if order:
+                    # make sure order contains only present values
+                    order_existing = [o for o in order if o in grouped[x].astype(str).unique()]
+                    if set(order_existing) != set(grouped[x].astype(str).unique()):
+                        # include any leftovers at end
+                        leftovers = [v for v in grouped[x].astype(str).unique() if v not in order_existing]
+                        order_existing += leftovers
+                    grouped = grouped.set_index(x).reindex(order_existing).reset_index()
+
+            # Now plot: basic bar with no legend (common_args handles legend)
+            grouped.plot(kind="bar", x=x, y=value_col, ax=ax, legend=False)
 
         return fig, ax
