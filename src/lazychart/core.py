@@ -1,13 +1,16 @@
 """lazychart is a lightweight Python helper to rapidly generate static plots from pandas DataFrames.
 It features sensible defaults and the option to use *sticky* parameters — it can remember previous arguments
 (like data, variables and axis labels) so you can churn out similar charts quickly without repeating boilerplate."""
-from typing import TypedDict, Optional, Union, Iterable, Dict, Any, Callable
+from typing import TypedDict, Optional, Union, Iterable, Dict, Any, Callable, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib import rcParams
 from matplotlib.font_manager import FontProperties
+from matplotlib.gridspec import GridSpec
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 from .colors import DEFAULT_PALETTE, COLORBLIND_PALETTE
 from functools import wraps
 import collections.abc
@@ -594,7 +597,7 @@ class ChartMonkey:
     @show_chart
     @sticky_args
     @common_args
-    def bar(
+    def bar_original(
         self,
         data: pd.DataFrame,
         x: str,
@@ -729,3 +732,292 @@ class ChartMonkey:
             grouped.plot(kind="bar", x=x, y=value_col, ax=ax, legend=False)
 
         return fig, ax
+    
+    def _make_figure(
+        chart1: Callable[[Axes], None],
+        chart2: Optional[Callable[[Axes], None]] = None,
+        legend1: Optional[str] = None, # left chart
+        legend2: Optional[str] = None, # right chart
+        legend: Optional[str] = None, # figure
+    ) -> Tuple[Figure, Dict[str, Axes]]:
+        """
+        Create a flexible figure layout for one or two charts (combo).
+        
+        This helper sets up a `subplot_mosaic` with slots for:
+        - TS (title space)
+        - D1 (left chart), RL1 (right legend for left chart)
+        - D2 (right chart, optional), RL2 (right legend for right chart, or combo with figure legend 'right')
+        - BL1, BL2 (bottom legend areas)
+        - FL (bottom figure legend that spans both BL1 and BL2)
+
+        Parameters
+        ----------
+        chart1 : Callable[[Axes], None]
+            A plotting function (e.g. self._bar) that draws into an Axes.
+        chart2 : Callable[[Axes], None], optional
+            A second plotting function for side-by-side combo charts.
+        legend1 : {"right", "bottom", None}, optional
+            Placement of legend for chart1.
+        legend2 : {"right", "bottom", None}, optional
+            Placement of legend for chart2 (only if chart2 is provided).
+        legend : {"right", "bottom", None}, optional
+            Placement of shared legend for combo charts ('right' will place it in the chart2 'right' region).
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        axes : dict[str, matplotlib.axes.Axes]
+            Dictionary of axes keyed by ["TS", "D1", "RL1", "D2", "RL2", "BL1", "BL2", "FL"].
+        """
+
+        LAYOUT = [
+        #     w[0]   w[1]    w[2]   w[3]
+            ["TS",  "TS",  "TS",  "TS"],  # h[0]
+            ["D1",  "RL1", "D2",  "RL2"], # h[1]
+            ["BL1", "BL1", "BL2", "BL2"], # h[2]
+            ["FL",  "FL",  "FL",  "FL"]   # h[3]
+        ]   
+
+        # Figure segment width and height values in inches
+        # standard figure size is [6.4, 4.8] and standard figure would have D1 and possibly TS above and RL on right or BL on bottom
+        # may need to tweak these to get a decent "average" starting point
+        w = [5.2, 1.2, 5.2, 1.2]  # Base: D1, RL1, D2, RL2 - assume right legends take up about 20% of a standard chart width
+        h = [0.6, 3.9, 0.9, 0.9]  # Base: TS, data row, bottom legend row - assume bottom legends take up about 20% of a standard chart height
+
+        # Collapse D2 & RL2 columns if not a combo chart
+        if not chart2:
+            w[2] = 0  # D2
+            w[3] = 0  # RL2
+
+        # Collapse unused legends
+        if legend == 'right': # figure legend in RL2
+            w[1] = 0  # RL1
+            h[2] = 0  # BL1, BL2
+            h[3] = 0 # FL
+        elif legend == 'bottom': # figure legend in FL
+            w[1] = 0  # RL1
+            w[3] = 0  # RL2
+            h[2] = 0 # BL1, BL2
+        else: # individual chart1/chart2 legends
+            h[3] = 0 # FL
+            if (legend1 != 'bottom' and legend2 != 'bottom'):
+                h[2] = 0  # BL1, BL2
+            if legend1 != 'right':
+                w[1] = 0  # RL1
+            if legend2 != 'right':
+                w[3] = 0  # RL2
+
+        # TODO: consider making additional adjustments based on legend row/ncol calcs (for larger legends), but may need a temp chart to resolve this?
+        
+        # Compute final fig size
+        fig_w = sum(w)
+        fig_h = sum(h)
+
+        fig, axes = plt.subplot_mosaic(LAYOUT, figsize=(fig_w, fig_h), gridspec_kw={"width_ratios": w, "height_ratios": h}, constrained_layout=True)
+
+        # Disable axes for legends/title areas
+        for key in ["TS", "RL1", "RL2", "BL1", "BL2", "FL"]:
+            axes[key].set_axis_off()
+
+        # Create charts
+        chart1(axes["D1"])
+        if chart2:
+            chart2(axes["D2"])
+
+        return fig, axes
+    
+    
+    
+
+
+
+    # TODO: I'm attempting to split bar_original into bar() and _bar() in line with the new approach
+    # the bar() has all the docstrings and is user facing, but actually passes most of the heavy lifting to the _bar function
+    # need to check/refine this attempt
+    def bar_rework_original(
+        self,
+        data: pd.DataFrame,
+        x: str,
+        y: Optional[str] = None,
+        group_by: Optional[str] = None,
+        aggfunc: Union[str, Callable] = "sum",
+        stacking: str = "none",
+        sort_x: Optional[str] = None,
+        sort_group_by: Optional[str] = None,
+        sort_x_ascending: Optional[bool] = None,
+        sort_group_by_ascending: Optional[bool] = None,
+        x_period: Optional[str] = None,
+        **kwargs: CommonArgsArgs
+    ):
+        """
+        Create a bar chart with optional grouping, stacking, and automatic aggregation.
+
+        Parameters:
+            data (pd.DataFrame): Input dataframe.
+            x (str): Column name for x-axis categories.
+            y (str, optional): Column name for y-axis values. If None, counts will be plotted.
+            group_by (str, optional): Column name for grouping within x-axis categories.
+            aggfunc (str or callable, default 'sum'): Aggregation function for y-values.
+                Examples: 'sum', 'mean', 'count', 'median', np.sum, np.mean, etc.
+            stacking (str, default 'none'): One of:
+                - 'none' (side-by-side bars)
+                - 'standard' (stacked bars)
+                - 'proportion' (100% stacked bars)
+            sort_x (str, optional): How to sort x-axis categories. Attempts to sort intuitively by default.
+                One of: 'label', 'value', 'none'.
+            sort_group_by (str, optional): How to sort group_by categories. Attempts to sort intuitively by default
+                One of: 'label', 'value', 'none'.
+            sort_x_ascending (bool, optional): Whether to sort x-axis categories in ascending order. Attempts to sort intuitively by default.
+            sort_group_by_ascending (bool, optional): Whether to sort group_by categories in descending order. Attempts to sort intuitively by default.
+            **kwargs: Additional common_args customisation (title, label, axis limit, etc.)
+
+        Returns:
+            (fig, ax): Matplotlib Figure and Axes objects (unless show_fig=True, then returns None).
+        """
+
+        # determine legend location
+        legend = kwargs.get('legend', None) # TODO: confirm default if no 'legend' is 'right' vs 'none' vs None
+        legend = legend if kwargs.get('group_by') else 'none' # TODO: confirm legends are only appropriate when you have a group_by variable
+
+        # prepare the figure and axes
+        fig, axes = self._make_figure(chart1='bar', legend1=legend)
+
+        # add the chart and legend to the appropriate axes
+        ax = axes["D1"]
+        # TODO: confirm if we need to add kwarg values into the kwargs dict e.g. data=... is passed, but we only pass kwargs through to _bar
+        self._bar(ax=ax, **kwargs) # TODO: confirm _bar doesn't need a return value? it just modifies the ax in place? also how to pass this through?
+        if legend == "right":
+            axes["RL1"].legend(*ax.get_legend_handles_labels(), loc="center left")
+        elif legend == "bottom":
+            axes["BL1"].legend(*ax.get_legend_handles_labels(), loc="center")
+        return fig, axes # TODO: this was original return fig. think about decorators and how return values will propogate up the decorator chain
+    
+    def _bar_rework_original(self, ax, *args, **kwargs): # TODO: give me a refresher on the unpack list * and why we have * for args and ** for kwargs. ELI15 :p I don't want ELI5 metaphors but I need a simple worked example to help it stick in my brain
+
+        # unpack values
+        # TODO: confirm if there's a quicker way to do this which isn't hugely anti-pythonic
+        data = kwargs.get('data')
+        x = kwargs.get('x')
+        y = kwargs.get('y')
+        group_by = kwargs.get('group_by')
+        aggfunc = kwargs.get('aggfunc')
+        stacking = kwargs.get('stacking')
+        sort_x = kwargs.get('sort_x')
+        sort_group_by = kwargs.get('sort_group_by')
+        sort_x_ascending = kwargs.get('sort_x_ascending')
+        sort_group_by_ascending = kwargs.get('sort_group_by_ascending')
+        x_period = kwargs.get('x_period')
+
+        # check values which are specific to this chart type so can't be checked earlier
+        if stacking not in {"none", "standard", "proportion"}:
+            raise ValueError("stacking must be one of: 'none', 'standard', 'proportion'")
+        
+        # Aggregate (this respects x_period if your _aggregate_data accepts it)
+        # TODO: understand what self._aggregate_data.__code__.co_varnames does
+        grouped = self._aggregate_data(data, x, y, group_by, aggfunc, x_period=x_period if 'x_period' in self._aggregate_data.__code__.co_varnames else None)
+
+        # If group_by provided, grouped is pivot-like (index = x, columns = group_by)
+        if group_by:
+            # Ensure columns/index are strings for consistent comparisons (we keep underlying values in grouped)
+            grouped.columns = grouped.columns.astype(str)
+            grouped.index = grouped.index.astype(str)
+
+            # 100% stacked proportions -> convert rows to proportions first (before sorting by value if needed)
+            if stacking == "proportion":
+                # avoid division by zero
+                row_sums = grouped.sum(axis=1).replace({0: np.nan})
+                grouped = grouped.div(row_sums, axis=0).fillna(0)
+
+            # Resolve ordering for group_by categories (columns)
+            cols_order = self._resolve_sort_order(
+                available=list(grouped.columns.astype(str)),
+                grouped=grouped,
+                sort_hint=sort_group_by,
+                is_index=False,
+                ascending=sort_group_by_ascending
+            )
+            # Reorder columns preserving only those that exist
+            cols_order = [c for c in cols_order if c in grouped.columns]
+            if cols_order:
+                grouped = grouped[cols_order]
+
+            # Resolve ordering for x categories (index)
+            idx_order = self._resolve_sort_order(
+                available=list(grouped.index.astype(str)),
+                grouped=grouped,
+                sort_hint=sort_x,
+                is_index=True,
+                ascending=sort_x_ascending
+            )
+            idx_order = [i for i in idx_order if i in grouped.index]
+            if idx_order:
+                grouped = grouped.loc[idx_order]
+
+            # Finally plot: stacked if stacking != 'none'
+            grouped.plot(kind="bar", stacked=(stacking != "none"), ax=ax)
+
+        else:
+            # Non-grouped case: grouped is a DataFrame either with columns [x, 'count'] or aggregated with as_index=False
+            # Normalize column names: ensure x exists and values are present
+            if y is None:
+                value_col = "count"
+            else:
+                value_col = y
+
+            # If grouped came back as a Series-like (size grouped), ensure it's a DataFrame with columns
+            if isinstance(grouped, pd.Series):
+                grouped = grouped.reset_index(name=value_col)
+
+            # Cast x column to string for explicit-list matching
+            grouped[x] = grouped[x].astype(str)
+
+            # Sorting when explicit list provided for sort_x
+            if isinstance(sort_x, Sequence) and not isinstance(sort_x, (str, bytes)):
+                requested = [str(s) for s in list(sort_x)]
+                requested_existing = [r for r in requested if r in grouped[x].unique()]
+                missing_existing = [a for a in grouped[x].unique() if a not in requested_existing]
+                explicit_order = requested_existing + missing_existing
+                # set index to x, reindex according to explicit order
+                grouped = grouped.set_index(x).reindex(explicit_order).reset_index()
+            else:
+                # Use helper to compute an ordering (value-based or label)
+                order = self._resolve_sort_order(
+                    available=list(grouped[x].astype(str).unique()),
+                    grouped=grouped.set_index(x) if value_col in grouped.columns else None,
+                    sort_hint=sort_x,
+                    is_index=False,
+                    ascending=sort_x_ascending
+                )
+                # If we got an ordering, reindex accordingly
+                if order:
+                    # make sure order contains only present values
+                    order_existing = [o for o in order if o in grouped[x].astype(str).unique()]
+                    if set(order_existing) != set(grouped[x].astype(str).unique()):
+                        # include any leftovers at end
+                        leftovers = [v for v in grouped[x].astype(str).unique() if v not in order_existing]
+                        order_existing += leftovers
+                    grouped = grouped.set_index(x).reindex(order_existing).reset_index()
+
+            # Now plot: basic bar with no legend (common_args handles legend)
+            grouped.plot(kind="bar", x=x, y=value_col, ax=ax, legend=False)
+
+    @show_chart
+    @sticky_args # TODO: consider how this will function if we pass different kwargs to the two charts e.g. x=col1 y=col2 and then x=col1 y=col3
+    @common_args
+    def combo(chart1, chart2, legend="right", sticky=False): # TODO: consider if we need other args here e.g. title, subtitle here vs taking it from chart1
+        """Create a combo chart with two charts side by side and optionally a shared legend.
+
+        TODO: tidy up this docstring and ideally make other docstrings throughout this script consistent. pick a base style that is best practice (e.g. Google docstrings) but balances being informative with being concise.
+        # I'm particularly keen to see how we resolve the common_args which are defined above but which need to be evident when one looks at the docstring for e.g. bar() combo()
+        
+        Arguments:
+        chart1 - a lazychart chart call e.g. bar(data=... x=..., y=..., groupby=...)
+        chart2 (optional) - a lazychart chart call e.g. bar(y=... groupby=...)
+          - note if sticky=True, arguments from chart1 will apply immediately to chart2
+
+        sticky (default: False)
+        """
+
+        # TODO - set this up e.g. pass two calls to _bar for chart1 and chart2, handle legend being passed through vs keeping it here and using axes
+        fig, axes = self._make_figure(chart1, chart2, legend)
+        return fig # TODO: this was original return fig. think about decorators and how return values will propogate up the decorator chain
