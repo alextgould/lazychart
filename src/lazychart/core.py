@@ -10,18 +10,73 @@ from matplotlib import rcParams
 from matplotlib.font_manager import FontProperties
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
-from .colors import DEFAULT_PALETTE, COLORBLIND_PALETTE
 from functools import wraps
 import collections.abc
 from collections.abc import Sequence
 from textwrap import wrap
 from math import ceil
+import functools
 
 # Logging
 from lazychart.log import create_logger
 logger = create_logger(__name__)
 
 # Decorators (apply to all chart functions)
+
+# TODO: consider just combining this with show_chart and sticky_args and maybe common_args (if not moved into the Class)
+def add_docstring(docstring):
+    """Appends a docstring to a function"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        
+        # Append the docstring
+        if wrapper.__doc__:
+            wrapper.__doc__ += "\n" + docstring
+        else:
+            wrapper.__doc__ = docstring
+            
+        return wrapper
+    return decorator
+
+# TODO: review the below - may not be complete or accurate.
+COMMON_ARGS_DOCSTRING = """
+    **kwargs: Common arguments for chart customization.
+
+    **Grouping of smaller group_by levels**
+    * **group_threshold** (`Union[int, float]`, optional): A threshold to group smaller categories into a single "Other" category. Can be a number (count) or a proportion (float between 0 and 1). Defaults to `None` which means no grouping is performed.
+    * **group_other_name** (`str`, optional): The name for the new category that contains the smaller, grouped categories. Defaults to `'Other'`.
+
+    **Labels and Titles**
+    * **title** (`str`, optional): The main title of the chart.
+    * **x_label** (`str`, optional): The label for the x-axis. Defaults to the column name if not provided. Pass an empty string (`""`) to display no label.
+    * **y_label** (`str`, optional): The label for the y-axis. Defaults to the column name if not provided. Pass an empty string (`""`) to display no label.
+
+    **Font and Text Size**
+    * **title_size** (`Union[str, int]`, optional): The font size for the main title. Can be an integer or a string preset like `'small'`, `'medium'`, `'large'`, or `'x-large'`.
+    * **x_label_size** (`Union[str, int]`, optional): The font size for the x-axis label.
+    * **y_label_size** (`Union[str, int]`, optional): The font size for the y-axis label.
+    * **tick_size** (`Union[str, int]`, optional): The font size for the axis tick labels.
+
+    **Axis Ranges**
+    * **x_min** (`float`, optional): The minimum value for the x-axis.
+    * **x_max** (`float`, optional): The maximum value for the x-axis.
+    * **y_min** (`float`, optional): The minimum value for the y-axis.
+    * **y_max** (`float`, optional): The maximum value for the y-axis.
+
+    **Axis Formatting**
+    * **x_axis_format** (`str`, optional): The format for the x-axis tick labels. Options include `'percent'`, `'comma'`, or `'short'`. Defaults to `None`.
+    * **y_axis_format** (`str`, optional): The format for the y-axis tick labels. Options include `'percent'`, `'comma'`, or `'short'`. Defaults to `None`.
+    * **decimals** (`int`, default: `0`): The number of decimal places to display on the axes.
+    * **xtick_rotation** (`int`, optional): The rotation angle (in degrees) for the x-axis tick labels.
+    * **ytick_rotation** (`int`, optional): The rotation angle (in degrees) for the y-axis tick labels.
+
+    **Legend and Gridlines**
+    * **legend** (`str`, default: `'right'`): The position of the chart legend. Options include `'right'`, `'bottom'`, or `'none'`.
+    * **grid_x** (`bool`, default: `False`): Whether to display vertical gridlines.
+    * **grid_y** (`bool`, default: `True`): Whether to display horizontal gridlines.
+"""
 
 def show_chart(func: Callable) -> Callable:
     """
@@ -58,7 +113,7 @@ def sticky_args(func):
 
         # save kwargs for future charts
         if sticky:
-            self._save_sticky(kwargs)
+            self.sticky(kwargs=kwargs)
 
         # load arguments from past charts unless in current kwargs
         if use_sticky:
@@ -67,6 +122,10 @@ def sticky_args(func):
         # all charts need data
         if kwargs.get('data', None) is None:
             raise ValueError('No data to chart')
+        
+        # TODO: consider use of default legend 'right' in half dozen different places throughout the code vs setting here for consistency
+        if kwargs.get('legend', None) is None:
+            kwargs['legend'] = 'right'
         
         return func(self, *args, **kwargs)
     return wrapper
@@ -109,7 +168,7 @@ class CommonArgsArgs(TypedDict, total=False):
     ytick_rotation: Optional[int] = None
 
     # legend
-    legend: Optional[str] = None
+    legend: Optional[str] = 'right' # note this won't actually inject it into e.g. bar() kwargs
 
     # grid
     grid_x: bool = False
@@ -201,9 +260,7 @@ def common_args(func: Callable) -> Callable:
         # TODO: consider adding subtitle functionality e.g. using suptitle for main title and title for subtitle
         if (x_label := kwargs.get('x_label')):
             ax.set_xlabel(x_label, fontsize=resolve_fontsize(kwargs.get('x_label_size'), "x_label"))
-        if not (y_label := kwargs.get('y_label')):
-            y_label = kwargs.get('y') if kwargs.get('y') else "Number of rows in dataset"
-        if y_label:
+        if (y_label := kwargs.get('y_label')):
             ax.set_ylabel(y_label, fontsize=resolve_fontsize(kwargs.get('y_label_size'), "y_label"))
 
         tick_size = resolve_fontsize(kwargs.get('tick_size'), "tick")
@@ -261,7 +318,7 @@ def common_args(func: Callable) -> Callable:
 # Main class
 
 class ChartMonkey:
-    def __init__(self, palette: Optional[Union[str, Iterable[str]]] = 'default'):
+    def __init__(self, palette: Optional[Union[str, Iterable[str]]] = 'rainbow'):
         """
         Parameters:
         - palette (str, iterable(str), default 'default'): sets the matplotlib prop_cycle colours
@@ -272,27 +329,37 @@ class ChartMonkey:
         self._sticky: Dict[str, Any] = {}
 
         # placeholder for better and more in-depth colour palette treatment
-        # (e.g. add to core.py decorator so it only impacts charts rather than using rcParams)
-        # (e.g. have a config file where HEX codes can be added for quick brand colour charts)
-        self.palette = self._resolve_palette(palette)
-        plt.rcParams['axes.prop_cycle'] = plt.cycler(color=self.palette)       
+        self.apply_palette(palette)
 
     # Sticky parameters
 
-    def _save_sticky(self, kwargs: Dict[str, Any]):
-        """Update sticky kwargs with new values"""
-        for k, v in kwargs.items():
-            self._sticky[k] = v
-            
+    def sticky(self, **kwargs: Dict[str, Any]):
+        """
+        Adds arguments to the 'sticky' dictionary for reuse.
+        These can also be added using sticky=True with individual chart calls.
+        Calling with no arguments, e.g., `sticky()`, will clear all sticky arguments.
+        """
+
+        # The dictionary of arguments passed from sticky_args
+        sticky_kwargs = kwargs.get('kwargs', {})
+        
+        # Add any other keyword arguments passed directly as this is a public facing API
+        sticky_kwargs.update({k: v for k, v in kwargs.items() if k != 'kwargs'})
+
+        if sticky_kwargs:
+            # add to the sticky dictionary
+            for k, v in sticky_kwargs.items():
+                self._sticky[k] = v
+        else:
+            # reset the sticky dictionary
+            self._sticky.clear()
+
     def _get_sticky(self, kwargs: Dict[str, Any]):
         """Combine sticky kwargs with new values"""
         for key in self._sticky:
             if key not in kwargs.keys():
                 kwargs[key] = self._sticky.get(key, None)
         return kwargs
-
-    def clear_sticky(self):
-        self._sticky = {}
 
     # Sample data
 
@@ -313,23 +380,52 @@ class ChartMonkey:
         return df
     
     # Palette
-    
-    def _resolve_palette(self, palette):
+
+    RAINBOW_PALETTE = [
+        '#e41a1c',  # Red
+        '#ff7f00',  # Orange
+        '#ffff33',  # Yellow
+        '#4daf4a',  # Green
+        '#377eb8',  # Blue
+        '#984ea3',  # Purple
+        '#f781bf',  # Pink
+        '#a65628',  # Brown
+        '#999999',  # Gray
+        '#66c2a5'   # Aqua
+    ]
+
+    COLORBLIND_PALETTE = [
+        '#E69F00',  # Orange
+        '#56B4E9',  # Sky Blue
+        '#009E73',  # Bluish Green
+        '#F0E442',  # Yellow
+        '#0072B2',  # Blue
+        '#D55E00',  # Vermillion
+        '#CC79A7',  # Reddish Purple
+        '#999999',  # Gray
+        '#000000',  # Black
+        '#FFFFFF'   # White
+    ]
+
+    def apply_palette(self, palette):
+        """Apply a hex list as the default matplotlib palette. Also accepts presets: 'rainbow' (default), 'colorblind'"""
+
         if isinstance(palette, str):
-            if palette.lower() == 'default':
-                return DEFAULT_PALETTE
-            elif palette.lower() == 'colorblind':
-                return COLORBLIND_PALETTE
+            if palette.lower() == 'rainbow':
+                palette = self.RAINBOW_PALETTE
+            elif palette.lower() in('colorblind', 'colourblind'):
+                palette = self.COLORBLIND_PALETTE
             else:
                 raise ValueError(f"Unknown palette preset: {palette}")
+
         elif isinstance(palette, collections.abc.Iterable) and not isinstance(palette, str):
-            # Optionally validate that all elements are strings (hex codes or color names)
             palette_list = list(palette)
             if not all(isinstance(c, str) for c in palette_list):
                 raise ValueError("Custom palette must be an iterable of strings (hex codes or color names)")
-            return palette_list
         else:
             raise ValueError("Palette must be a string preset or an iterable of color strings")
+        
+        plt.rcParams['axes.prop_cycle'] = plt.cycler(color=palette)          
     
     # Data aggregation
     
@@ -430,16 +526,21 @@ class ChartMonkey:
         Resolve ordering for a single axis (x or group_by).
 
         Parameters
-        - available: iterable of labels currently present (e.g. list(grouped.index) or list(grouped.columns) or unique raw values)
-        - grouped: the aggregated/pivot DataFrame (optional). Required when sort_hint == 'value' to compute sums.
-        - sort_hint: None | 'label' | 'value' | 'none' | list_of_labels
-        - is_index: True if available corresponds to the DataFrame index (use sums axis=1 for 'value'), else columns (axis=0)
-        - ascending: optional boolean; if None we fall back to intuitive defaults:
-            - label => True for numeric-like (keep chronological), False for categorical (desc)
-            - value => False for categorical (desc), True for numeric-like (asc)
-        Returns:
-        - list: resolved ordering (subset/reorder of available)
+        ----------
+        available : iterable
+            Labels currently present (e.g. list of index values or columns).
+        grouped : DataFrame or Series, optional
+            Aggregated data used to compute totals when sort_hint == "value".
+        sort_hint : {'label', 'value', 'none'} or sequence, optional
+            How to sort. A sequence provides explicit order.
+        is_index : bool, default False
+            If True, available corresponds to DataFrame index (rows).
+        ascending : bool, optional
+            Whether to sort ascending. Defaults depend on context.
+                - label => True for numeric-like (keep chronological), False for categorical (desc)
+                - value => False for categorical (desc), True for numeric-like (asc)
         """
+            
         # Normalize available to list of strings (preserves original labels but cast to str for matching)
         avail_list = [str(a) for a in list(available)]
 
@@ -454,29 +555,21 @@ class ChartMonkey:
         if sort_hint == 'none':
             return avail_list
 
-        # Decide numeric-like hint for default ascending behaviour (only if grouped provided, else conservative False)
+        # Decide defaults
         numeric_like = False
         if grouped is not None and len(avail_list) > 0:
             try:
-                # Peek first element mapping back to grouped to check dtype only if possible
-                numeric_like = False
                 if is_index:
-                    # try to infer from grouped.index if it has dtype information
-                    try:
-                        idx = grouped.index
-                        numeric_like = pd.api.types.is_numeric_dtype(idx.dtype) or pd.api.types.is_datetime64_any_dtype(idx.dtype)
-                    except Exception:
-                        numeric_like = False
+                    idx = grouped.index if hasattr(grouped, "index") else []
+                    numeric_like = pd.api.types.is_numeric_dtype(getattr(idx, "dtype", None)) \
+                                or pd.api.types.is_datetime64_any_dtype(getattr(idx, "dtype", None))
                 else:
-                    # infer from grouped columns or its first column values
-                    try:
-                        # if columns are strings, not helpful — fallback to values in grouped
-                        numeric_like = any(pd.api.types.is_numeric_dtype(grouped[c].dtype) for c in grouped.columns[:1])  # rough test
-                    except Exception:
-                        numeric_like = False
+                    if isinstance(grouped, pd.DataFrame):
+                        numeric_like = any(pd.api.types.is_numeric_dtype(grouped[c].dtype)
+                                        for c in grouped.columns[:1])
             except Exception:
                 numeric_like = False
-
+            
         # Default ascending if not provided
         if ascending is None:
             if sort_hint == 'label':
@@ -497,10 +590,11 @@ class ChartMonkey:
                 # no information to sort by value; fall back to available order
                 return avail_list
             if is_index:
-                # grouped: rows are the x categories -> sum across columns to compare row totals
-                sums = grouped.sum(axis=1)
+                if isinstance(grouped, pd.Series): # sort directly on values if a series is provided (e.g. pie chart)
+                    sums = grouped
+                else:
+                    sums = grouped.sum(axis=1)
                 ordered = [str(i) for i in sums.sort_values(ascending=ascending).index.tolist()]
-                # ensure only available ones are returned (safety)
                 return [o for o in ordered if o in avail_list]
             else:
                 # columns case: sum across rows for each column
@@ -556,7 +650,7 @@ class ChartMonkey:
         # Otherwise wrap
         return ['\n'.join(wrap(lbl, max_chars)) for lbl in labels]
 
-    def _legend_ncol(self, fig, ax, legend_pos, max_ratio=0.9):
+    def _legend_ncol(self, fig, ax, legend_pos = 'right', max_ratio=0.9):
         """Determine optimal number of legend columns"""
 
         handles, labels = ax.get_legend_handles_labels()
@@ -652,13 +746,12 @@ class ChartMonkey:
     
     def _finalize_layout(
         self, fig: Figure, axes: Union[Axes, Dict[str, Axes]],
-        legend: Optional[str] = None,
+        legend: str = 'right',
         title: Optional[str] = None,
+        resize_fig: bool = True,
     ) -> None:
         """Adjust legend, title, and figure size after plotting."""
 
-        #logger.debug(f"_finalize_layout: initial fig size: {fig.get_size_inches()}")
-        
         if not isinstance(axes, dict):
             axes = {"D1": axes}
 
@@ -668,7 +761,7 @@ class ChartMonkey:
             handles += h
             labels += l
 
-        if not handles or not legend:
+        if not handles or legend == 'none':
             if title:
                 fig.suptitle(self._wrap_title(fig, title))
             fig.tight_layout()
@@ -691,21 +784,16 @@ class ChartMonkey:
         fig_width, fig_height = fig.get_size_inches()
         leg_width, leg_height = fig_width * bb.width, fig_height * bb.height
 
-        #logger.debug(f"_finalize_layout: temp_leg bb {bb}")
-        #logger.debug(f"_finalize_layout: fig_width {fig_width} leg_width {leg_width}, fig_height {fig_height}, leg_height {leg_height}")
-
-        # # Expand figure to acccomodate the legend
-        if True: # figure resizing
+        # Expand figure to acccomodate the legend
+        if resize_fig:
+            # Expand figure
             if legend == "right":
                 fig.set_size_inches(fig_width + leg_width, fig_height, forward=True)
             elif legend == "bottom":
                 fig.set_size_inches(fig_width, fig_height + leg_height, forward=True)
             fig.canvas.draw()
         
-        #logger.debug(f"_finalize_layout: fig size after expansion: {fig.get_size_inches()}")
-        
-        # Adjust layout
-        if True: # rect scaling
+            # Adjust layout so legend takes extra space
             if legend == "right":
                 rect = [0, 0, 1 / (1 + bb.width), 1]
             else:  # bottom
@@ -716,23 +804,11 @@ class ChartMonkey:
         if title:
             fig.suptitle(self._wrap_title(fig, title))
 
-        #logger.debug(f"_finalize_layout: calling tight_layout with rect: {rect}")
-        
         fig.tight_layout(rect=rect) # rect is [left, bottom, right, top]
-
-        #for name, ax in axes.items():
-        #    logger.debug(f"_finalize_layout: ax {name} pos: {ax.get_position().bounds}")
-
         loc = "center right" if legend == "right" else "lower center"
         bbox = (1.0, 0.5) if legend == "right" else (0.5, 0)
         fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox)
-
-        final_leg = fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox)
         fig.canvas.draw()
-        bb_final = final_leg.get_window_extent().transformed(fig.transFigure.inverted())
-        #logger.debug(f"_finalize_layout: final legend bb {bb_final}")
-
-        #logger.debug(f"_finalize_layout: final fig size: {fig.get_size_inches()}")
 
     # Charts
 
@@ -817,6 +893,7 @@ class ChartMonkey:
     @show_chart
     @sticky_args
     @common_args
+    @add_docstring(COMMON_ARGS_DOCSTRING)
     def bar(
         self,
         data: pd.DataFrame,
@@ -857,7 +934,7 @@ class ChartMonkey:
         Returns:
             (fig, ax): Matplotlib Figure and Axes objects (unless show_fig=True, then returns None).
         """
-
+        
         fig, ax = self._make_figure()
 
         # Draw chart
@@ -870,8 +947,12 @@ class ChartMonkey:
             sort_group_by_ascending=sort_group_by_ascending,
             x_period=x_period,
         )
-        self._finalize_layout(fig, ax, legend=kwargs.get("legend"), title=kwargs.get("title"))
+        self._finalize_layout(fig, ax, legend=kwargs.get("legend", "right"), title=kwargs.get("title"))
 
+        # Auto label y axis if count
+        if y is None and group_by is None and kwargs.get('y_label', None) is None:
+            kwargs['y_label'] = "Number of rows in data"
+        
         return fig, ax
 
     def _line(
@@ -945,6 +1026,7 @@ class ChartMonkey:
     @show_chart
     @sticky_args
     @common_args
+    @add_docstring(COMMON_ARGS_DOCSTRING)
     def line(
         self,
         data: pd.DataFrame,
@@ -985,15 +1067,42 @@ class ChartMonkey:
         aggfunc: Union[str, Callable] = "sum",
         sort_names: Optional[str] = None,
         sort_names_ascending: Optional[bool] = None,
+        show_labels: bool = False,
+        show_percent: Union[bool, str] = True,
     ):
-        
-        # Aggregate if category column provided
+        """
+        Internal helper for pie chart.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Source dataframe.
+        values : str
+            Column of numeric values for wedge sizes.
+        names : str, optional
+            Column of categories for slices. If None, one slice per row in `values`.
+        aggfunc : str or callable, default "sum"
+            Aggregation to apply if `names` is given.
+        sort_names : {'label', 'value', 'none'} or sequence, optional
+            How to sort slices.
+        sort_names_ascending : bool, optional
+            Sort ascending (True) or descending (False).
+        show_labels : bool, default False
+            Whether to show category labels directly on slices.
+        show_percent : bool or str, default True
+            Whether to show percentages inside slices.
+            - True → show as whole % (e.g. "23%")
+            - str → a format string passed to `autopct` (e.g. '%1.1f%%')
+            - False → no percentages inside slices
+        """
+
+        # Aggregate values
         if names:
             grouped = data.groupby(names, as_index=True)[values].agg(aggfunc)
         else:
             grouped = data[values]
 
-        # Optional sorting
+        # Sorting
         order = self._resolve_sort_order(
             available=list(grouped.index.astype(str)),
             grouped=grouped,
@@ -1004,21 +1113,37 @@ class ChartMonkey:
         if order:
             grouped = grouped.loc[order]
 
-        # Draw pie — no legend (we’ll handle that outside)
+        # autopct logic
+        if show_percent:
+            if isinstance(show_percent, str):
+                autopct = show_percent
+            else:
+                autopct = "%1.0f%%"
+        else:
+            autopct = None
+
+        # labels logic
+        labels = grouped.index if show_labels else None
+
         wedges, texts, autotexts = ax.pie(
             grouped,
-            labels=None,  # suppress labels inside slices
-            autopct=None,
-            startangle=90
+            labels=labels,
+            autopct=autopct,
+            startangle=90,
         )
 
-        # Attach handles+labels to Axes for external legend use
-        ax._pie_handles = wedges
-        ax._pie_labels = [str(l) for l in grouped.index]
+        # # For legend usage
+        # ax._pie_handles = wedges
+        # ax._pie_labels = [str(l) for l in grouped.index]
+
+        # Attach handles and labels so legend machinery picks them up
+        for w, lbl in zip(wedges, grouped.index):
+            w.set_label(str(lbl))
 
     @show_chart
     @sticky_args
     @common_args
+    @add_docstring(COMMON_ARGS_DOCSTRING)
     def pie(
         self,
         data: pd.DataFrame,
@@ -1027,13 +1152,44 @@ class ChartMonkey:
         aggfunc: Union[str, Callable] = "sum",
         sort_names: Optional[str] = None,
         sort_names_ascending: Optional[bool] = None,
+        show_labels: bool = False,
+        show_percent: Union[bool, str] = True,
         **kwargs: CommonArgsArgs
     ):
-        """TODO: fix docstrings"""
+        """
+        Create a pie chart with optional aggregation and sorting.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input dataframe.
+        values : str
+            Column of numeric values for wedge sizes.
+        names : str, optional
+            Column of categories for slices. If None, one slice per row in `values`.
+        aggfunc : str or callable, default "sum"
+            Aggregation function if `names` is provided.
+        sort_names : {'label', 'value', 'none'} or sequence, optional
+            How to sort categories.
+        sort_names_ascending : bool, optional
+            Sort ascending (True) or descending (False).
+        show_labels : bool, default False
+            Show labels directly on wedges.
+        show_percent : bool or str, default True
+            Show percentages inside wedges.
+            - True → whole % (e.g. "23%")
+            - str → custom format (e.g. '%1.1f%%')
+            - False → no percentages inside wedges
+        **kwargs
+            Additional common_args customization (title, legend, fonts, etc.)
+
+        Returns
+        -------
+        (fig, ax) : Matplotlib Figure and Axes
+        """
 
         fig, ax = self._make_figure()
 
-        # Draw chart
         self._pie(
             ax=ax,
             data=data,
@@ -1042,14 +1198,27 @@ class ChartMonkey:
             aggfunc=aggfunc,
             sort_names=sort_names,
             sort_names_ascending=sort_names_ascending,
+            show_labels=show_labels,
+            show_percent=show_percent,
         )
-        
+
+        # If labels are directly on slices, default to no legend unless user overrode
+        if show_labels and "legend" not in kwargs:
+            kwargs["legend"] = "none"
+
+        self._finalize_layout(fig, ax, legend=kwargs.get("legend", "right"), title=kwargs.get("title"), resize_fig=False)
+
+        # Pies don’t have Cartesian axes — clear labels
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
         return fig, ax
     
     # Combo charts
 
     @show_chart
     @sticky_args
+    @add_docstring(COMMON_ARGS_DOCSTRING)
     # @common_args # needs a rewrite to handle separate axes
     # consider replacing the decorator approach with an explicit call similar to _finalize_layout e.g. _style_data_axes which is called in charts but not combo chart
     # also consider building sticky_args into show_chart... and/or consider how sticky_args will work with combo charts...

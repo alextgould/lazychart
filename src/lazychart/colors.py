@@ -1,4 +1,4 @@
-DEFAULT_PALETTE = [
+RAINBOW_PALETTE = [
     '#e41a1c',  # Red
     '#ff7f00',  # Orange
     '#ffff33',  # Yellow
