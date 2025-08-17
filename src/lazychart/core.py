@@ -527,34 +527,6 @@ class ChartMonkey:
         handle_px = rcParams['legend.handlelength'] * em_to_px
         pad_px = rcParams['legend.handletextpad'] * em_to_px
         return handle_px + pad_px
-
-    def _legend_ncol(self, fig, ax, legend, max_ratio=0.9):
-        fontsize = FontProperties(size=rcParams['legend.fontsize']).get_size_in_points()
-        dpi = fig.dpi
-        char_px = fontsize * dpi / 72.0 * 0.6
-        _, labels = ax.get_legend_handles_labels()
-        handle_pad_px = self._legend_handle_and_padding_width(fig)
-        text_heights = [fontsize * dpi / 72.0 * 1.2 for _ in labels]  # approx height per label in px
-
-        if legend == 'bottom':
-            fig_width_px = fig.get_size_inches()[0] * fig.dpi # use width
-            max_width_px = fig_width_px * max_ratio
-            text_widths = [len(lbl) * char_px + handle_pad_px for lbl in labels]
-            avg_width = sum(text_widths) / len(text_widths)
-            ideal_ncol = max(1, int(max_width_px // avg_width))
-            rows = ceil(len(labels) / ideal_ncol)
-            ncol = ceil(len(labels) / rows)
-            return max(1, min(len(labels), ncol))
-        else:
-            fig_height_px = fig.get_size_inches()[1] * fig.dpi # use height
-            max_height_px = fig_height_px * max_ratio
-            avg_label_h = sum(text_heights) / len(text_heights)
-            max_rows = max(1, int(max_height_px // avg_label_h))
-            if max_rows >= len(labels):
-                return 1
-            else:
-                ncol = ceil(len(labels) / max_rows)
-                return max(1, min(len(labels), ncol))
     
     def _legend_wrap(self, fig, labels, max_ratio=0.3):
         """
@@ -583,6 +555,57 @@ class ChartMonkey:
 
         # Otherwise wrap
         return ['\n'.join(wrap(lbl, max_chars)) for lbl in labels]
+
+    def _legend_ncol(self, fig, ax, legend_pos, max_ratio=0.9):
+        """Determine optimal number of legend columns"""
+
+        handles, labels = ax.get_legend_handles_labels()
+        if not labels:
+            return 1  # nothing to do
+
+        dpi = fig.dpi
+
+        if legend_pos == 'right':
+            fig_height_px = fig.get_size_inches()[1] * dpi
+            max_height_px = fig_height_px * max_ratio
+
+            # use a temporary 1-col legend to get per label height
+            temp_leg = fig.legend(handles, labels, ncol=1, loc='upper right', frameon=False)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            bb = temp_leg.get_window_extent(renderer=renderer)
+            temp_leg.remove()
+
+            total_height_px = bb.height
+            avg_height_px = total_height_px / len(labels)
+            max_rows = max(1, int(max_height_px // avg_height_px))
+            if max_rows >= len(labels):
+                return 1
+            else:
+                return ceil(len(labels) / max_rows)
+        
+        elif legend_pos == 'bottom':
+            fig_width_px = fig.get_size_inches()[0] * dpi
+            max_width_px = fig_width_px * max_ratio
+
+            # measure a temporary 1-row legend to get per-label width
+            temp_leg = fig.legend(handles, labels, ncol=len(labels), loc='upper right', frameon=False)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            bb = temp_leg.get_window_extent(renderer=renderer)
+            temp_leg.remove()
+
+            total_width_px = bb.width
+            avg_width_px = total_width_px / len(labels)
+            max_cols = max(1, int(max_width_px // avg_width_px)) # e.g. 4
+            if max_cols >= len(labels):
+                return len(labels)
+            else: # distribute labels more evenly across columns e.g. instead of 4 + 1 let's have 3 + 2
+                max_rows = ceil(len(labels) / max_cols) # e.g. 5 / 4 -> 2
+                return ceil(len(labels) / max_rows) # e.g. 5 / 2 -> 3
+
+        else:
+            return 1
 
     @staticmethod
     def _unique_by_label(handles, labels):
@@ -634,7 +657,7 @@ class ChartMonkey:
     ) -> None:
         """Adjust legend, title, and figure size after plotting."""
 
-        logger.debug(f"_finalize_layout: initial fig size: {fig.get_size_inches()}")
+        #logger.debug(f"_finalize_layout: initial fig size: {fig.get_size_inches()}")
         
         if not isinstance(axes, dict):
             axes = {"D1": axes}
@@ -653,7 +676,8 @@ class ChartMonkey:
 
         # Dedup + wrap + ncol
         handles, labels = self._unique_by_label(handles, labels)
-        labels = self._legend_wrap(fig, labels)
+        if legend == 'right':
+            labels = self._legend_wrap(fig, labels)
 
         # Decide number of columns dynamically
         ncol = self._legend_ncol(fig, list(axes.values())[0], legend)
@@ -667,8 +691,8 @@ class ChartMonkey:
         fig_width, fig_height = fig.get_size_inches()
         leg_width, leg_height = fig_width * bb.width, fig_height * bb.height
 
-        logger.debug(f"_finalize_layout: temp_leg bb {bb}")
-        logger.debug(f"_finalize_layout: fig_width {fig_width} leg_width {leg_width}, fig_height {fig_height}, leg_height {leg_height}")
+        #logger.debug(f"_finalize_layout: temp_leg bb {bb}")
+        #logger.debug(f"_finalize_layout: fig_width {fig_width} leg_width {leg_width}, fig_height {fig_height}, leg_height {leg_height}")
 
         # # Expand figure to acccomodate the legend
         if True: # figure resizing
@@ -678,7 +702,7 @@ class ChartMonkey:
                 fig.set_size_inches(fig_width, fig_height + leg_height, forward=True)
             fig.canvas.draw()
         
-        logger.debug(f"_finalize_layout: fig size after expansion: {fig.get_size_inches()}")
+        #logger.debug(f"_finalize_layout: fig size after expansion: {fig.get_size_inches()}")
         
         # Adjust layout
         if True: # rect scaling
@@ -692,12 +716,12 @@ class ChartMonkey:
         if title:
             fig.suptitle(self._wrap_title(fig, title))
 
-        logger.debug(f"_finalize_layout: calling tight_layout with rect: {rect}")
+        #logger.debug(f"_finalize_layout: calling tight_layout with rect: {rect}")
         
         fig.tight_layout(rect=rect) # rect is [left, bottom, right, top]
 
-        for name, ax in axes.items():
-            logger.debug(f"_finalize_layout: ax {name} pos: {ax.get_position().bounds}")
+        #for name, ax in axes.items():
+        #    logger.debug(f"_finalize_layout: ax {name} pos: {ax.get_position().bounds}")
 
         loc = "center right" if legend == "right" else "lower center"
         bbox = (1.0, 0.5) if legend == "right" else (0.5, 0)
@@ -706,9 +730,9 @@ class ChartMonkey:
         final_leg = fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox)
         fig.canvas.draw()
         bb_final = final_leg.get_window_extent().transformed(fig.transFigure.inverted())
-        logger.debug(f"_finalize_layout: final legend bb {bb_final}")
+        #logger.debug(f"_finalize_layout: final legend bb {bb_final}")
 
-        logger.debug(f"_finalize_layout: final fig size: {fig.get_size_inches()}")
+        #logger.debug(f"_finalize_layout: final fig size: {fig.get_size_inches()}")
 
     # Charts
 
