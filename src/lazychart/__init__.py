@@ -23,3 +23,10 @@ def hist(*args, **kwargs):
 
 def pie(*args, **kwargs):
     return cm.pie(*args, **kwargs)
+
+# expose version
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("lazychart")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lazychart"
-version = "0.0.1"
+version = "0.1.0"
 description = "Quickly create consistent static data visualisations with sensible defaults and 'sticky' parameters."
 readme = "README.md"
 authors = [{name = "Alex Gould"}]
 dependencies = ["pandas>=1.0", "numpy>=1.20", "matplotlib>=3.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [project.urls]
 "Homepage" = "https://alextgould.github.io/"
