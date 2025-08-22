@@ -280,4 +280,3 @@ def test_integrated_flow_values_then_pivot(cm, base_df):
     # basic sanity: columns are the groups, index are ordered categories
     assert set(wide.columns) == set(base_df["group"].unique())
     assert list(wide.index) == sorted(base_df["x_cat"].unique().tolist())
-

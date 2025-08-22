@@ -129,6 +129,7 @@ COMMON_DOCSTRING = """
         Whether to apply existing sticky arguments to the current chart
     palette : str | Sequence[str], optional
         Per-chart color cycle (overrides global palette for this chart only).
+    palette_map : dict, optional
     target_x : float, optional
         Adds a vertical dotted line at a given x value
     target_y : float, optional
@@ -139,8 +140,23 @@ COMMON_DOCSTRING = """
     """
 
 # -----------------------------------------------------------------------------
-# Palettes
+# Palette presets
 # -----------------------------------------------------------------------------
+
+FALLBACK_PALETTE = [
+    "#0F4C81",  # deep blue (Pantone Classic Blue-ish)
+    "#EE6352",  # coral red
+    "#59CD90",  # emerald
+    "#3FA7D6",  # azure
+    "#FAC05E",  # saffron
+    "#8F2D56",  # mulberry
+    "#5B5F97",  # indigo gray
+    "#2EC4B6",  # turquoise
+    "#9F86C0",  # lavender
+    "#BC4749",  # brick red
+    "#6A994E",  # olive green
+    "#386641",  # forest green
+]
 
 RAINBOW_PALETTE = [
     '#e41a1c',  # Red
@@ -167,41 +183,6 @@ COLORBLIND_PALETTE = [
     '#000000',  # Black
     '#FFFFFF'   # White
 ]
-
-def _resolve_palette(palette: Optional[Union[str, Sequence[str]]]) -> Optional[List[str]]:
-    """
-    Resolve a palette specification into a concrete list of colors.
-
-    This function is designed to be flexible:
-    - If `palette` is None, returns None. This allows passing the result directly
-      to plotting functions (e.g., `plot(color=_resolve_palette(...))`) without extra checks.
-    - If `palette` is a string and it matches a known named palette, returns that palette's list of colors.
-    - If `palette` is already a list/tuple of colors, it is returned as a list.
-    - Raises ValueError if the palette cannot be resolved.
-
-    Returns:
-        A list of colors, or None if no palette was provided.
-    """
-    if palette is None:
-        return None
-
-    named_palettes = {
-        "default": RAINBOW_PALETTE,
-        "rainbow": RAINBOW_PALETTE,
-        "colorblind": COLORBLIND_PALETTE,
-    }
-
-    if isinstance(palette, str):
-        if palette.lower() in named_palettes:
-            return list(named_palettes[palette.lower()])
-        else:
-            raise ValueError(f"Unrecognized palette string '{palette}'")
-
-    # Already a list/tuple of colors
-    try:
-        return list(palette)
-    except Exception as e:
-        raise ValueError(f"Invalid palette type: {type(palette)} ({e})")
 
 # -----------------------------------------------------------------------------
 # Config
@@ -281,6 +262,7 @@ class ChartConfig:
 
     # ---- Other ----
     palette: Optional[Union[str, Sequence[str]]] = None
+    palette_map: Dict[Any, str] = field(default_factory=dict)
     target_x: Optional[float] = None
     target_y: Optional[float] = None
     target_x_label: Optional[str] = None
@@ -464,14 +446,10 @@ class ChartMonkey:
         self._chart_params = config
         return config
 
-    # ---- Palette API ------------------------------------------------------------
-    def set_palette(self, palette: Union[str, Sequence[str]]) -> None:
-        """Set the global color cycler (matplotlib rcParam)."""
-        colors = _resolve_palette(palette)
-        if colors is not None:
-            rcParams['axes.prop_cycle'] = plt.cycler(color=colors)
+# -----------------------------------------------------------------------------
+# Sample Data 
+# -----------------------------------------------------------------------------
 
-    # ---- Sample data ------------------------------------------------------------
     def example_data(self, n: int = 2000, seed: int = 42) -> pd.DataFrame:
         """Return a synthetic wellness dataset for demos/tests."""
         np.random.seed(seed)
@@ -599,7 +577,6 @@ class ChartMonkey:
         cfg = self._chart_params
         df = self._prepare_dataframe() # check data exists, create defensive copy
         df = self._coerce_x_period(df) # x_period mapping
-        df = self._apply_label_map(df) # label mapping
 
         # Place values into a list
         # (note values are often "y" but for pie chart will be "values)
@@ -721,11 +698,19 @@ class ChartMonkey:
                 rs = wide.sum(axis=1).replace({0: np.nan})
                 wide = wide.div(rs, axis=0).fillna(0)
 
+            # Remap labels
+            if cfg.label_map:
+                wide = wide.rename(columns=cfg.label_map)
+
             return wide
 
         # Single series (no group_by): return one 'value' column indexed by x
         if cfg.x in df_long.columns:
             out = df_long.set_index(cfg.x)["value"].to_frame("value")
+
+            # Remap labels
+            if cfg.label_map and not (cfg.x_period or isinstance(out.index, pd.DatetimeIndex)):
+                out.index = out.index.map(lambda v: cfg.label_map.get(v, v))
 
             if getattr(cfg, "show_gaps", False):
                 full_idx = _full_x_index(out.index)
@@ -1154,6 +1139,86 @@ class ChartMonkey:
         fig.canvas.draw()
 
 # -----------------------------------------------------------------------------
+# Palettes
+# -----------------------------------------------------------------------------
+
+    def _palette_presets(self, name: str) -> Optional[list[str]]:
+        presets = {
+            "rainbow": RAINBOW_PALETTE,
+            "colorblind": COLORBLIND_PALETTE,
+            "default": RAINBOW_PALETTE,
+        }
+        key = (name or "").lower()
+        return list(presets.get(key)) if key in presets else None
+
+    def set_palette(self, palette: Union[Dict[Any, str], str, Sequence[str]]) -> None:
+        """
+        Saves defaults to be used in future charts via sticky():
+        - dict: merge into default palette_map
+        - list/tuple: set default palette list
+        - str ('rainbow'/'colorblind'/'default'): set default palette list by preset
+        """
+        if isinstance(palette, dict):
+            current = dict(self._sticky.get("palette_map", {}))
+            current.update(palette)
+            self.sticky(palette_map=current)
+            return
+
+        if isinstance(palette, str):
+            preset = self._palette_presets(palette)
+            if preset:
+                self.sticky(palette=preset)
+            return
+
+        # list/tuple/sequence
+        try:
+            seq = list(palette)  # type: ignore[arg-type]
+        except Exception:
+            seq = []
+        if seq:
+            self.sticky(palette=seq)
+
+    def _get_palette(self, labels: Sequence[Any]) -> list[str]:
+        """
+        Precedence:
+        1) cfg.palette_map (per-label)
+        2) cfg.palette (list or preset name)
+        3) FALLBACK_PALETTE
+        Always returns ≥ len(labels); pads with FALLBACK_PALETTE as needed.
+        """
+        cfg = self._chart_params
+        labels = list(labels) or ["_dummy_"]
+
+        # 1) start with per-label map (partial ok)
+        pm = getattr(cfg, "palette_map", {}) or {}
+        out: list[Optional[str]] = [pm.get(lab) for lab in labels]
+
+        # 2) fill from per-chart palette (list or preset string), in order
+        base: list[str] = []
+        if cfg.palette is not None:
+            if isinstance(cfg.palette, str):
+                base = self._palette_presets(cfg.palette) or []
+            else:
+                try:
+                    base = list(cfg.palette)
+                except Exception:
+                    base = []
+        bi = 0
+        for i, c in enumerate(out):
+            if c is None and base:
+                out[i] = base[bi] if bi < len(base) else None
+                bi += 1
+
+        # 3) pad remaining with FALLBACK_PALETTE
+        fi = 0
+        for i, c in enumerate(out):
+            if c is None:
+                out[i] = FALLBACK_PALETTE[fi % len(FALLBACK_PALETTE)]
+                fi += 1
+
+        return [str(c) for c in out]  # type: ignore[return-value]
+
+# -----------------------------------------------------------------------------
 # Chart Primitives                                                           
 # -----------------------------------------------------------------------------
 
@@ -1164,9 +1229,10 @@ class ChartMonkey:
         cfg = self._chart_params
         fig, ax = self._ensure_fig_ax(ax)
         chart_data = self._pivot_data(df)
+        labels_for_color = list(chart_data.columns) if cfg.group_by else [cfg.y or "value"]
         chart_data.plot(kind="bar",
                         stacked=(cfg.stacking != "none"),
-                        color=_resolve_palette(cfg.palette),
+                        color=self._get_palette(labels_for_color),
                         ax=ax,
                         legend=False)
         return fig, ax, chart_data
@@ -1187,10 +1253,10 @@ class ChartMonkey:
         # Long -> wide (and handle gaps/percent if configured)
         chart_data = self._pivot_data(df)
 
-        # Draw (DataFrame.plot handles both single and multi-column cases)
+        labels_for_color = list(chart_data.columns) if chart_data.shape[1] > 1 else ["value"]
         chart_data.plot(ax=ax,
                         marker="o",
-                        color=_resolve_palette(cfg.palette),
+                        color=self._get_palette(labels_for_color),
                         legend=False)
 
         return fig, ax, chart_data
@@ -1215,6 +1281,10 @@ class ChartMonkey:
         # Build chart_data (already aggregated/sorted upstream)
         chart_data = df[[names_col, "value"]].copy().set_index(names_col)
 
+        # Remap labels
+        if cfg.label_map:
+            chart_data.index = chart_data.index.map(lambda v: cfg.label_map.get(v, v))
+
         # Labels / percentages
         labels = chart_data.index.astype(str).values if cfg.show_labels else None
         if cfg.show_percent is True:
@@ -1225,10 +1295,11 @@ class ChartMonkey:
             autopct = None
 
         # Draw
+        labels_for_color = list(chart_data.index)
         wedges, texts, autotexts = ax.pie(
             chart_data["value"].values,
             labels=labels,
-            colors=_resolve_palette(cfg.palette),
+            colors=self._get_palette(labels_for_color),
             autopct=autopct,
             startangle=90,
             counterclock=False,
