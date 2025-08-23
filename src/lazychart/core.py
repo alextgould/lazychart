@@ -532,24 +532,48 @@ class ChartConfig:
 # Compare API helper
 # -----------------------------------------------------------------------------
 
-@dataclass
 class ChartSpec:
-    """Wrapper for a chart function with a render function """
-    kind: str
-    kwargs: Dict[str, Any]
+    """
+    A proxy for an individual chart which is part of a compare() chart
+    e.g. cm.chart.bar (rather than cm.bar for a standalone chart).
+     
+    The ChartSpec class is used to let us pass functions without messy lambdas i.e.
 
-    def render(self, cm: "ChartMonkey", ax: Axes):
-        method = getattr(cm, self.kind)
-        return method(ax=ax, finalize=False, **self.kwargs)
+        cm.compare(
+            cm.chart.bar(x="alcohol", subtitle="Alcohol histogram"),
+            cm.chart.bar(x="weekday", subtitle="Weekday histogram")
+        )
 
-class ChartProxy:
-    """Let us call e.g. cm.compare(cm.chart.bar(...), cm.chart.line(...)) without needing lambda functions to add an ax """
-    def __init__(self, cm: "ChartMonkey"):
+    instead of 
+    
+        cm.compare(
+            lambda ax: cm.bar(ax=ax, x="alcohol", finalize=False),
+            lambda ax: cm.bar(ax=ax, x="weekday", finalize=False),
+        )
+    """
+
+    def __init__(self, cm: "ChartMonkey", kind: Optional[str] = None, kwargs: Optional[Dict[str, Any]] = None):
         self._cm = cm
-    def __getattr__(self, name: str) -> Callable[..., ChartSpec]:
-        def _factory(**kwargs: Any) -> ChartSpec:
-            return ChartSpec(kind=name, kwargs=kwargs)
+        self.kind = kind
+        self.kwargs = kwargs or {}
+
+    def __getattr__(self, name: str):
+        """Builds a concrete spec when used on the root "cm.chart" object.
+        A spec is a recipe: it stores *what* to draw (`kind`) and *how* to draw it (`kwargs`).
+        It does **not** draw until `compare()` calls `.render(...)`
+        """
+        def _factory(**kwargs: Any) -> "ChartSpec":
+            return ChartSpec(self._cm, name, kwargs)
         return _factory
+
+    def render(self, ax: Axes):
+        """API for drawing onto a Matplotlib Axes using the corresponding
+        public method (e.g. `cm.bar`) with `finalize=False`
+        
+        Returns fig, ax, chart_data
+        """
+        method = getattr(self._cm, self.kind)
+        return method(ax=ax, finalize=False, **self.kwargs)
 
 # -----------------------------------------------------------------------------
 # Styling helpers
@@ -626,7 +650,7 @@ class ChartMonkey:
             self.set_palette(palette)
 
         # Compare API helper
-        self.chart = ChartProxy(self)
+        self.chart = ChartSpec(self)
 
     def sticky(self, **kwargs: Dict[str, Any]):
         """
@@ -1534,16 +1558,21 @@ class ChartMonkey:
 # Chart Primitives                                                           
 # -----------------------------------------------------------------------------
 
-    def _save_and_return(self, fig, ax, chart_data) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
+    def _save_and_return(
+        self,
+        fig: Figure,
+        axes: Union[Axes, Sequence[Axes], Dict[str, Axes]],
+        chart_data: Union[pd.DataFrame, List[pd.DataFrame], None],
+    ) -> Optional[Tuple[Figure, Union[Axes, Sequence[Axes], Dict[str, Axes]], Union[pd.DataFrame, List[pd.DataFrame], None]]]:
+        
         cfg = self._chart_params
         if cfg.save_path:
             fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
         if cfg.show_fig:
             plt.show()
         if cfg.return_values or not cfg.show_fig:
-            return fig, ax, chart_data
-        else:
-            return None
+            return fig, axes, chart_data
+        return None
 
     def _chart_pipeline(
         self,
@@ -1692,46 +1721,44 @@ class ChartMonkey:
     @add_docstring(COMMON_DOCSTRING)
     def compare(
         self,
-        chart1: Callable[[Axes], None],
-        chart2: Callable[[Axes], None],
-        chart3: Optional[Callable[[Axes], None]] = None,
+        chart1: ChartSpec,
+        chart2: ChartSpec,
+        chart3: Optional[ChartSpec] = None,
         *,
         sharey: bool = False,
         **kwargs: Any,
     ) -> tuple[Figure, Dict[str, Axes]]:
-        """Create a side-by-side figure (2 or 3 axes) from individual lazychart charts.
+        """Create a side-by-side figure (2 or 3 axes) of individual lazychart charts,
+        using the chart proxy to create a ChartSpec for each chart.
 
-        Each `chartX(ax)` should be a callable that draws onto the provided Axes,
-        ideally by calling a public method with `ax=ax, finalize=False`, e.g.:
-
-            lambda ax: cm.bar(ax=ax, data=df, x='...', y='...', finalize=False)
+        Usage example:
+        
+        cm.compare(
+            cm.chart.bar(...),
+            cm.chart.line(...),
+            title = "..."
+        )
 
         Figure-level config (title, legend position, fig_size, save/show) is taken from compare() kwargs.
         Axis-level config comes from each chart's own call.
         """
-        # 1) Compare-level config drives figure/title/legend/save/show
+        # Compare() function config drives figure/title/legend/save/show
         fig_cfg = self._set_params(**kwargs)
 
+        # Build a figure to place the individual charts into
         n = 3 if chart3 else 2
-        base_w, base_h = fig_cfg.fig_size                                  # use your unit fig_size
-        fig, axs = plt.subplots(1, n, figsize=(base_w * n, base_h), sharey=sharey)
+        base_w, base_h = fig_cfg.fig_size
+        fig, axes = plt.subplots(1, n, figsize=(base_w * n, base_h), sharey=sharey)
 
-        # Map axes for user-friendly return
-        if n == 2:
-            axes: Dict[str, Axes] = {"D1": axs[0], "D2": axs[1]}
-        else:
-            axes = {"D1": axs[0], "D2": axs[1], "D3": axs[2]}
-
-        # 2) Delegate drawing to child charts (axis-only finalize=False)
-        # (note each of these may update self.chart_params...)
-        _, _, chart_data1 = chart1.render(self, axes["D1"])
-        _, _, chart_data2 = chart2.render(self, axes["D2"])
+        # Draw child charts
+        _, _, chart_data1 = chart1.render(axes[0])
+        _, _, chart_data2 = chart2.render(axes[1])
+        chart_data = [chart_data1, chart_data2]
         if chart3:
-            _, _, chart_data3 = chart3.render(self, axes["D3"])
+            _, _, chart_data3 = chart3.render(axes[2])
+            chart_data.append(chart_data3)
 
-        # 3) Single shared legend/title/layout for all axes
-        # (...hence we overwrite these with the figure level settings before styling the figure)
+        # Figure styling
         self._chart_params = fig_cfg
-        self._style_fig(fig, list(axes.values()))
-        chart_data = [chart_data1, chart_data2] + ([chart_data3] if chart_data3 is not None else [])
+        self._style_fig(fig, axes)
         self._save_and_return(fig, axes, chart_data)

@@ -649,3 +649,15 @@ Help me decide what to work on next. My options are:
 8. Looking through my code for "TODO" comments that I've left lying around, looking at the different standard plot "kind" options and adding more functionality based on what I find.
 
 What order would you approach these options in and why?
+
+```chatGPT
+Recommended Order
+comparison() – unlocks layouts, reveals structural needs.  -DONE
+Test existing code – quick confidence boost.
+line() – fills a gap, stress-tests utilities.
+Wrapper refactor – cut duplication, streamline growth.  -DONE
+Docs/README – polish after stabilization.
+Module split – structure for v1.0.
+Specialized charts (delay, mix, etc.) – build on strong foundations.
+TODO sweeps / extras – ongoing polish.
+```

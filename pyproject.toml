@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lazychart"
-version = "0.2.0"
+version = "0.3.0"
 description = "Quickly create consistent static data visualisations with sensible defaults and 'sticky' parameters."
 readme = "README.md"
 authors = [{name = "Alex Gould"}]
