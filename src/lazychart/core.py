@@ -104,7 +104,7 @@ COMMON_DOCSTRING = """
     subtitle : str, optional
     x_label : str, optional
     y_label : str, optional
-    legend_label : str, optional
+    legend_title : str, optional
     title_size : int | {'small','medium','large','x-large'}, optional
     subtitle_size : int | {'small','medium','large','x-large'}, optional
     x_label_size : int | {'small','medium','large','x-large'}, optional
@@ -118,7 +118,7 @@ COMMON_DOCSTRING = """
     group_threshold : int | float, optional
         If int: keep top-N categories, group the rest as 'Other'.
         If 0< float <=1: keep categories cumulatively until this proportion.
-    group_other_name : str, default 'Other'
+    other_label : str, default 'Other'
         Label for grouped small categories.
 
     Other
@@ -128,8 +128,9 @@ COMMON_DOCSTRING = """
     use_sticky : bool, default True
         Whether to apply existing sticky arguments to the current chart
     palette : str | Sequence[str], optional
-        Per-chart color cycle (overrides global palette for this chart only).
+        List of hex colour codes to use for this chart. Use set_palette to apply this to all charts.
     palette_map : dict, optional
+        Mapping of labels to hex colour codes to use for this chart. Use set_palette to apply this to all charts.
     target_x : float, optional
         Adds a vertical dotted line at a given x value
     target_y : float, optional
@@ -137,7 +138,194 @@ COMMON_DOCSTRING = """
     target_x_label : str, optional
     target_y_label : str, optional
 
+    Notes
+    -----
+    Several aliases from matplotlib/pandas/seaborn/plotly are accepted for
+    user convenience, e.g. `xlabel` → `x_label`, `xlim=(min,max)` →
+    `x_min`/`x_max`, `legend_title` → `legend_label`. 
+    Similarly some plurals may work, e.g. `labels` → `label`
+    Only canonical names are documented above.
     """
+
+# -----------------------------------------------------------------------------
+# Public-API aliases (ergonomics for users coming from matplotlib/seaborn/pandas/plotly)
+# -----------------------------------------------------------------------------
+
+# Simple one-to-one key renames
+ALIASES: Dict[str, str] = {
+    # Labels / titles
+    "xlabel": "x_label",
+    "ylabel": "y_label",
+    "legend_title": "legend_label",     # canonical stays legend_label internally
+
+    # Sizing / ticks
+    "figsize": "fig_size",
+    "rot": "xtick_rotation",
+
+    # Grouping / aggregation
+    "hue": "group_by",
+    "estimator": "aggfunc",
+
+    # Legend synonyms
+    "legend_pos": "legend",
+    "legend_position": "legend",
+    "loc": "legend",                    # common matplotlib muscle memory
+
+    # Sorting synonyms
+    "x_sort": "sort_x",
+    "x_order": "sort_x",
+    "group_sort": "sort_group_by",
+    "group_by_sort": "sort_group_by",
+    "hue_sort": "sort_group_by",
+    "hue_order": "sort_group_by",
+    "names_sort": "sort_names",
+    "names_order": "sort_names",
+    "label_sort": "sort_names",
+
+    # Sorting ascending flags
+    "x_sort_ascending": "sort_x_ascending",
+    "group_sort_ascending": "sort_group_by_ascending",
+    "group_by_sort_ascending": "sort_group_by_ascending",
+    "hue_sort_ascending": "sort_group_by_ascending",
+    "names_sort_ascending": "sort_names_ascending",
+
+    # Colors / palettes
+    "labels_map": "label_map",
+    "label_mapping": "label_map",
+    "category_map": "label_map",
+}
+
+# Composite aliases that expand into multiple canonical keys
+COMPOSITE_ALIASES: Dict[str, Tuple[str, str]] = {
+    "xlim": ("x_min", "x_max"),
+    "ylim": ("y_min", "y_max"),
+    # Optional: vertical/horizontal reference lines (friends from mpl)
+    "vline": ("target_x", None),            # single float → target_x
+    "hline": (None, "target_y"),            # single float → target_y
+    "vline_label": ("target_x_label", None),
+    "hline_label": (None, "target_y_label"),
+}
+
+# Value maps for common synonyms
+_STACKING_SYNONYMS = {
+    "stack": "stacked",
+    "stacked": "stacked",
+    "group": "none",          # grouped/dodged bars
+    "dodge": "none",
+    "none": "none",
+    "relative": "proportion", # 100% stacked
+    "fill": "proportion",
+    "proportion": "proportion",
+}
+
+# barmode→stacking (plotly-ism)
+_BARMODE_TO_STACKING = {
+    "stack": "stacked",
+    "group": "none",
+    "overlay": "none",
+    "relative": "proportion",
+}
+
+def _normalize_legend_value(value: Any) -> Optional[Literal["right", "bottom", "none"]]:
+    """Coerce a variety of legend inputs into our LegendPosition or None (meaning 'leave default')."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "right" if value else "none"
+    v = str(value).strip().lower()
+    if v in {"none", "off", "hide", "false", "0"}:
+        return "none"
+    if v in {"right", "r"}:
+        return "right"
+    if v in {"bottom", "b"}:
+        return "bottom"
+    # Common matplotlib locs → a reasonable position
+    if "right" in v:
+        return "right"
+    if "lower" in v or "bottom" in v:
+        return "bottom"
+    # 'best', 'upper left', 'center', etc. → default to right
+    return "right"
+
+def _normalize_kwargs(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize user-facing kwargs into canonical ChartConfig keys/values.
+    Precedence: canonical key in `raw` wins over any alias for that key.
+    Unknown keys are dropped.
+    """
+    if not raw:
+        return {}
+
+    # Start with a shallow copy to avoid mutating caller data
+    kw = dict(raw)
+
+    # Canonical keys taken from dataclass fields
+    CANONICAL_KEYS = set(ChartConfig.__dataclass_fields__.keys())  # type: ignore[attr-defined]
+
+    normalized: Dict[str, Any] = {}
+
+    # 1) First, copy through any canonical keys as-is
+    for k, v in kw.items():
+        if k in CANONICAL_KEYS:
+            normalized[k] = v
+
+    # 2) Expand composite aliases like xlim/ylim, vline/hline
+    for alias, targets in COMPOSITE_ALIASES.items():
+        if alias in kw:
+            v = kw[alias]
+            left_key, right_key = targets
+            # (xlim, ylim): expect a 2-length sequence
+            if alias in ("xlim", "ylim"):
+                try:
+                    a, b = (v[0], v[1]) if isinstance(v, (list, tuple)) and len(v) >= 2 else (None, None)
+                except Exception:
+                    a, b = (None, None)
+                if left_key and left_key not in normalized and a is not None:
+                    normalized[left_key] = a
+                if right_key and right_key not in normalized and b is not None:
+                    normalized[right_key] = b
+            else:
+                # vline/hline singletons or labels
+                if left_key and left_key not in normalized and v is not None:
+                    normalized[left_key] = v
+                if right_key and right_key not in normalized and v is not None:
+                    normalized[right_key] = v
+
+    # 3) Apply one-to-one key aliases (only if canonical missing)
+    for alias, canon in ALIASES.items():
+        if alias in kw and canon not in normalized:
+            normalized[canon] = kw[alias]
+
+    # 4) Value coercion / special cases
+
+    # legend (accept via 'legend' or its aliases handled above)
+    if "legend" in normalized or any(a in kw for a in ("legend", "legend_pos", "legend_position", "loc")):
+        # Prefer the canonical key value if present, else fall back to the first alias provided
+        raw_val = (kw.get("legend", kw.get("legend_pos", kw.get("legend_position", kw.get("loc")))))
+        val = _normalize_legend_value(normalized.get("legend", raw_val))
+        if val is not None:
+            normalized["legend"] = val
+
+    # stacking: accept synonyms
+    if "stacking" in kw or "stacking" in normalized:
+        val = normalized.get("stacking", kw.get("stacking"))
+        if isinstance(val, str):
+            normalized["stacking"] = _STACKING_SYNONYMS.get(val.lower(), val)
+
+    # barmode → stacking (only if stacking not explicitly set)
+    if "barmode" in kw and "stacking" not in normalized:
+        bm = str(kw["barmode"]).lower()
+        mapped = _BARMODE_TO_STACKING.get(bm)
+        if mapped:
+            normalized["stacking"] = mapped
+
+    # If user provided seaborn-style *order= sequences, pass them through to our sort_*
+    # (already mapped by ALIASES above). Nothing more to do here.
+
+    # 5) Drop anything not part of ChartConfig (defensive)
+    normalized = {k: v for k, v in normalized.items() if k in CANONICAL_KEYS}
+
+    return normalized
 
 # -----------------------------------------------------------------------------
 # Palette presets
@@ -213,7 +401,7 @@ class ChartConfig:
 
     # ---- Grouping ----
     group_threshold: Optional[Union[int, float]] = None
-    group_other_name: str = "Other"
+    other_label: str = "Other"
 
     # ---- Ordering ----
     sort_x: Optional[Union[Literal["label", "value", "none"], Sequence[Any]]] = None
@@ -261,12 +449,14 @@ class ChartConfig:
     show_percent: Union[bool, str] = True
 
     # ---- Other ----
-    palette: Optional[Union[str, Sequence[str]]] = None
-    palette_map: Dict[Any, str] = field(default_factory=dict)
     target_x: Optional[float] = None
     target_y: Optional[float] = None
     target_x_label: Optional[str] = None
     target_y_label: Optional[str] = None
+
+    # ---- Chart level palette overrides ---
+    palette : Optional[Sequence[str]] = None
+    palette_map : Dict[Any, str] = field(default_factory=dict)
 
     def _normalize_x_period(self, x_period: str | None, *, week_anchor: str = "W-MON") -> str | None:
         """
@@ -404,6 +594,8 @@ class ChartMonkey:
         """
         self._sticky: Dict[str, Any] = {}
         self._chart_params: Optional[ChartConfig] = None
+        self.palette: Optional[Sequence[str]] = None
+        self.palette_map: Dict[Any, str] = {}
         if palette is not None:
             self.set_palette(palette)
 
@@ -429,20 +621,36 @@ class ChartMonkey:
             self._sticky.clear()
 
     def _set_params(self, **kwargs: Any) -> ChartConfig:
-        """Merge sticky + kwargs into a `ChartConfig` and store on the instance."""
+        """Merge sticky + kwargs into a `ChartConfig`, normalizing aliases, and store on the instance."""
 
-        # use pop to avoid retaining control flags
+        # pop control flags and palette overrides first (do not forward to ChartConfig)
         sticky = kwargs.pop("sticky", False)
         use_sticky = kwargs.pop("use_sticky", True)
+        palette = kwargs.pop("palette", None)
+        palette_map = kwargs.pop("palette_map", None)
 
-        # save kwargs for future charts
+        # normalize the incoming kwargs before doing anything else
+        norm_kwargs = _normalize_kwargs(kwargs)
+
+        # If caller asked to make these sticky, store the *normalized* keys
         if sticky:
-            self.sticky(kwargs=kwargs)
+            self.sticky(kwargs=norm_kwargs)
 
-        # create current chart config using current kwargs and/or sticky values
+        # Start from existing sticky (optionally) and normalize it too (for backward safety)
         base = dict(getattr(self, "_sticky", {})) if use_sticky else {}
-        config_values = {**base, **kwargs}
+
+        # Later kwargs override earlier sticky values
+        config_values = {**base, **norm_kwargs}
+
+        # Build and keep the current chart config
         config = ChartConfig(**config_values)
+
+        # chart specific palette overrides
+        if palette is not None:
+            config.palette = self._coerce_palette_input(palette)
+        if palette_map is not None:
+            config.palette_map = dict(palette_map)
+            
         self._chart_params = config
         return config
 
@@ -561,7 +769,7 @@ class ChartMonkey:
         else:
             return df
         # Name the "other" category
-        other_name = cfg.group_other_name or "Other"
+        other_name = cfg.other_label or "Other"
         df[target_col] = np.where(df[target_col].isin(keep), df[target_col], other_name)
         return df
 
@@ -698,9 +906,13 @@ class ChartMonkey:
                 rs = wide.sum(axis=1).replace({0: np.nan})
                 wide = wide.div(rs, axis=0).fillna(0)
 
-            # Remap labels
+            # Remap labels (group_by → column headers)
             if cfg.label_map:
                 wide = wide.rename(columns=cfg.label_map)
+
+            # Remap x index labels (x → index values) for non-time axes
+            if cfg.label_map and not (cfg.x_period or isinstance(wide.index, (pd.DatetimeIndex, pd.PeriodIndex))):
+                wide.index = wide.index.map(lambda v: cfg.label_map.get(v, v))
 
             return wide
 
@@ -732,17 +944,53 @@ class ChartMonkey:
     ) -> pd.Index:
         """Determine most appropriate sort index"""
 
+        # sort target does not exist
         if target not in df.columns:
             return pd.Index([])
+        
+        # sort strategy does not exist
         if strategy is None or strategy == "none":
-            return pd.Index(pd.unique(df[target]))
-        if isinstance(strategy, (list, tuple, pd.Index)):  # explicit list (append any missing labels at the end)
+            uniq = pd.unique(df[target])
+
+            # If ascending explicitly provided, do a sensible default sort
+            if ascending is not None:
+                asc = bool(ascending)
+                # numeric-friendly sort when possible
+                if pd.api.types.is_numeric_dtype(df[target]):
+                    return pd.Index(sorted(uniq, key=lambda x: (float(x) if pd.notna(x) else float("inf")), reverse=not asc))
+                # otherwise string sort
+                return pd.Index(sorted(uniq, key=lambda x: (str(x).lower() if pd.notna(x) else ""), reverse=not asc))
+            
+            return pd.Index(uniq)
+        
+        # Explicit list strategy
+        if isinstance(strategy, (list, tuple, pd.Index)):
             avail_list = list(pd.unique(df[target]))
             requested = list(strategy)
             requested_existing = [r for r in requested if r in avail_list]
+
+            # also accept mapped labels
+            cfg = self._chart_params
+            if cfg.label_map:
+                rev = {v: k for k, v in cfg.label_map.items()}
+                requested = [rev.get(r, r) for r in requested]
+
+            # append missing labels at the end
             missing_existing = [a for a in avail_list if a not in requested_existing]
             return pd.Index(requested_existing + missing_existing)
         asc = True if ascending is None else bool(ascending)
+
+        # normalize strategy strings (accept plural synonyms)
+        if isinstance(strategy, str):
+            key = strategy.strip().lower()
+            if key in {"labels", "names"}:
+                strategy = "label"
+            elif key in {"values", "totals", "sum"}:
+                strategy = "value"
+            else:
+                strategy = key
+
+        # apply label or value sort strategies
         if strategy == "label":
             return pd.Index(sorted(pd.unique(df[target]), key=lambda x: (str(x).lower() if pd.notna(x) else ""), reverse=not asc))
         if strategy == "value":
@@ -1150,73 +1398,93 @@ class ChartMonkey:
         }
         key = (name or "").lower()
         return list(presets.get(key)) if key in presets else None
-
-    def set_palette(self, palette: Union[Dict[Any, str], str, Sequence[str]]) -> None:
-        """
-        Saves defaults to be used in future charts via sticky():
-        - dict: merge into default palette_map
-        - list/tuple: set default palette list
-        - str ('rainbow'/'colorblind'/'default'): set default palette list by preset
-        """
-        if isinstance(palette, dict):
-            current = dict(self._sticky.get("palette_map", {}))
-            current.update(palette)
-            self.sticky(palette_map=current)
-            return
-
+    
+    def _coerce_palette_input(self, palette: Union[str, Sequence[str]]) -> list[str]:
+        """Return a concrete list of hex colors from a preset name or a sequence."""
         if isinstance(palette, str):
-            preset = self._palette_presets(palette)
-            if preset:
-                self.sticky(palette=preset)
+            return self._palette_presets(palette) or []
+        try:
+            return [str(c) for c in list(palette)]
+        except Exception:
+            return []
+
+    def set_palette(
+        self,
+        palette: Union[Dict[Any, str], str, Sequence[str]],
+        *,
+        append: bool = False,
+    ) -> None:
+        """
+        Set instance-level palette defaults:
+        - dict -> update/replace self.palette_map
+        - str/sequence -> update/replace self.palette (stored as a list of hex strings)
+        """
+        
+        # dict => affects palette_map
+        if isinstance(palette, dict):
+            if append:
+                self.palette_map.update(palette)
+            else:
+                self.palette_map = dict(palette)
             return
 
-        # list/tuple/sequence
-        try:
-            seq = list(palette)  # type: ignore[arg-type]
-        except Exception:
-            seq = []
-        if seq:
-            self.sticky(palette=seq)
+        # str/sequence => affects palette (store as list[str])
+        new_list = self._coerce_palette_input(palette)  # list[str]
+        if not new_list:
+            return
+
+        if append and self.palette:
+            self.palette = list(self.palette) + new_list
+        else:
+            self.palette = new_list
 
     def _get_palette(self, labels: Sequence[Any]) -> list[str]:
-        """
-        Precedence:
-        1) cfg.palette_map (per-label)
-        2) cfg.palette (list or preset name)
-        3) FALLBACK_PALETTE
-        Always returns ≥ len(labels); pads with FALLBACK_PALETTE as needed.
+        """Creates a list of hex colour codes with len(labels). Precedence:
+        1) cfg.palette_map (chart-specific per-label)
+        2) cfg.palette (chart-specific list)
+        3) self.palette_map (instance per-label)
+        4) self.palette (instance list)
+        5) FALLBACK_PALETTE (pads/cycles if necessary)
         """
         cfg = self._chart_params
         labels = list(labels) or ["_dummy_"]
+        palette: list[Optional[str]] = [None] * len(labels)
 
-        # 1) start with per-label map (partial ok)
-        pm = getattr(cfg, "palette_map", {}) or {}
-        out: list[Optional[str]] = [pm.get(lab) for lab in labels]
+        def fill_from_map(palette: list[Optional[str]], mapping: Dict[Any, str]) -> None:
+            """Iterate through a list of labels and place the matching colour if it's found in the dictionary"""
+            for i, lab in enumerate(labels):
+                if palette[i] is None and lab in mapping:
+                    palette[i] = mapping[lab]
 
-        # 2) fill from per-chart palette (list or preset string), in order
-        base: list[str] = []
-        if cfg.palette is not None:
-            if isinstance(cfg.palette, str):
-                base = self._palette_presets(cfg.palette) or []
-            else:
-                try:
-                    base = list(cfg.palette)
-                except Exception:
-                    base = []
-        bi = 0
-        for i, c in enumerate(out):
-            if c is None and base:
-                out[i] = base[bi] if bi < len(base) else None
-                bi += 1
+        def fill_from_list(palette: list[Optional[str]], colors: Sequence[str]) -> None:
+            """Iterate through a list of colours and place them into None slots in the palette"""
+            it = iter(colors)
+            for i, c in enumerate(palette):
+                if c is None:
+                    try:
+                        palette[i] = next(it)
+                    except StopIteration:
+                        break
 
-        # 3) pad remaining with FALLBACK_PALETTE
-        fi = 0
-        for i, c in enumerate(out):
-            if c is None:
-                out[i] = FALLBACK_PALETTE[fi % len(FALLBACK_PALETTE)]
-                fi += 1
+        def cycle_list(palette: list[Optional[str]], colors: Sequence[str]) -> None:
+            """Cycle through a list of colours and place them into None slots in the palette"""
+            fi = 0
+            for i, c in enumerate(palette):
+                if c is None:
+                    palette[i] = colors[fi % len(colors)]
+                    fi += 1
 
-        return [str(c) for c in out]  # type: ignore[return-value]
+        if cfg.palette_map:
+            fill_from_map(palette, cfg.palette_map)
+        if cfg.palette:
+            fill_from_list(palette, cfg.palette)
+        if self.palette_map:
+            fill_from_map(palette, self.palette_map)
+        if self.palette:
+            fill_from_list(palette, self.palette)
+        cycle_list(palette, FALLBACK_PALETTE)
+
+        return [str(c) for c in palette]
 
 # -----------------------------------------------------------------------------
 # Chart Primitives                                                           

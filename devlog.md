@@ -316,6 +316,7 @@ Then just tag v0.1.0; your wheels/install will carry that version (and dev build
 * add a little bit of padding between x axis label and tick mark labels
 * show days with zero data in a x_period chart (e.g. days)
 * better way to show weeks in a x_period chart
+* legend title based on group_by variable by default (only on right legend?)
 
 #### To be added
 
@@ -325,7 +326,6 @@ Then just tag v0.1.0; your wheels/install will carry that version (and dev build
 
 I want to add in a compare chart which can compare two charts side-by-side (and ideally allow three side-by-side if it's not overly complex). I note that the _ensure_fig_ax function has been set up to accept an existing axis for this purpose. Ideally I would like the 
 
-* legend title based on group_by variable by default (only on right legend?)
 * delay chart which takes two date cols and/or date col + date const and calculates the difference then plots bar chart / line chart distribution (based on kind='bar' etc) of counts/outcomes grouped by the delay
 
 
@@ -592,3 +592,9 @@ def pie():
 
 
 ```
+
+
+### Prompt playground
+
+Help me decide what to work on next. My options are:
+1. Implement a new comparison() chart type which places 2 charts next to each other (and possibly 3) with a shared axis. I've been trying to structure my code to make this easier (e.g. )
