@@ -527,7 +527,29 @@ class ChartConfig:
         self.x_period = self._normalize_x_period(self.x_period)
         if self.x_period and self.show_gaps is None:
             self.show_gaps = True
-        
+
+# -----------------------------------------------------------------------------
+# Compare API helper
+# -----------------------------------------------------------------------------
+
+@dataclass
+class ChartSpec:
+    """Wrapper for a chart function with a render function """
+    kind: str
+    kwargs: Dict[str, Any]
+
+    def render(self, cm: "ChartMonkey", ax: Axes):
+        method = getattr(cm, self.kind)
+        return method(ax=ax, finalize=False, **self.kwargs)
+
+class ChartProxy:
+    """Let us call e.g. cm.compare(cm.chart.bar(...), cm.chart.line(...)) without needing lambda functions to add an ax """
+    def __init__(self, cm: "ChartMonkey"):
+        self._cm = cm
+    def __getattr__(self, name: str) -> Callable[..., ChartSpec]:
+        def _factory(**kwargs: Any) -> ChartSpec:
+            return ChartSpec(kind=name, kwargs=kwargs)
+        return _factory
 
 # -----------------------------------------------------------------------------
 # Styling helpers
@@ -592,12 +614,19 @@ class ChartMonkey:
             'rainbow' (default), 'colorblind' (aka 'colourblind').
             Pass a list of colors to use a custom palette.
         """
+        
+        # Config
         self._sticky: Dict[str, Any] = {}
         self._chart_params: Optional[ChartConfig] = None
+        
+        # Palette
         self.palette: Optional[Sequence[str]] = None
         self.palette_map: Dict[Any, str] = {}
         if palette is not None:
             self.set_palette(palette)
+
+        # Compare API helper
+        self.chart = ChartProxy(self)
 
     def sticky(self, **kwargs: Dict[str, Any]):
         """
@@ -1039,7 +1068,7 @@ class ChartMonkey:
         return df
     
 # -----------------------------------------------------------------------------
-# Axes / Styling 
+# Axes styling
 # -----------------------------------------------------------------------------
 
     def _ensure_fig_ax(self, ax: Optional[Axes] = None) -> tuple[Figure, Axes]:
@@ -1115,7 +1144,7 @@ class ChartMonkey:
                 label=cfg.target_x_label or None,
             )
 
-    def _apply_common_style(self, fig: Figure, ax: Axes, chart_data: Optional[pd.DataFrame] = None) -> Tuple[Figure, Axes]:
+    def _style_axes(self, fig: Figure, ax: Axes, chart_data: Optional[pd.DataFrame] = None):
         """Apply axis labels, axis limits, axis formats, tick rotation, grid"""
         cfg = self._chart_params
 
@@ -1183,7 +1212,7 @@ class ChartMonkey:
         return fig, ax
     
 # -----------------------------------------------------------------------------
-# Figure / Legend Layout 
+# Figure styling 
 # -----------------------------------------------------------------------------
 
     def _legend_wrap(self, fig: Figure, labels: Sequence[str], max_ratio: float = 0.3) -> Sequence[str]:
@@ -1277,58 +1306,62 @@ class ChartMonkey:
         max_chars = int((fig_w_px * max_ratio) // char_px) # maximum characters in % of figure width
         return "\n".join(wrap(title, max_chars))
         
-    def _finalise_layout(self, fig: Figure, ax: Axes) -> None:
+    def _style_fig(self, fig: Figure, axes: Union[Axes, Sequence[Axes]]):
         """
-        Adjust figure to accomodate legend and title
+        Shared legend + title + layout for one or multiple axes.
         
         Notes
         - Wraps right legend entries
         - Hides legends with only one label
         - Increase figure size to accomodate legend and title (using a temporary legend and fig.text to estimate required space)
         - Title (figure suptitle) centers over the axes area, not the figure, so it never spans the right legend region
-        - Subtitle (axis title) is naturally aligned to the axes.        
+        - Subtitle (axis title) is naturally aligned to the axes.  
         """
-
-        # Config
         cfg = self._chart_params
-        legend = cfg.legend or "none"
+        legend_pos = cfg.legend or "none"
         title_fontsize = _resolve_fontsize(cfg.title_size, "title")
         subtitle_fontsize = _resolve_fontsize(cfg.subtitle_size, "subtitle")
 
-        # Legend entries
-        handles, labels = ax.get_legend_handles_labels()
-        labels = [l for l in labels if l and l != "_nolegend_"]
-        
-        # Hide legend if no useful labels (e.g. single series "value")
+        # Collect handles/labels across all axes; dedupe in order
+        handles, labels, seen = [], [], set()
+        for a in axes:
+            h, l = a.get_legend_handles_labels()
+            for hi, li in zip(h, l):
+                if not li or li == "_nolegend_":
+                    continue
+                if li not in seen:
+                    seen.add(li); handles.append(hi); labels.append(li)
+
+        # Hide legend if trivial
         if not labels or len(set(labels)) <= 1:
-            legend = "none"
+            legend_pos = "none"
 
-        # Wrap right legend labels
-        if labels and legend == "right":
-            labels = list(self._legend_wrap(fig, labels))
-
-        # Wrap title/subtitle
+        # Wrap title/subtitle                                                              OK
         if cfg.title:
             title_wrap = self._title_wrap(fig, cfg.title, title_fontsize)
         if cfg.subtitle:
-                subtitle_wrap = self._title_wrap(fig, cfg.subtitle, subtitle_fontsize)
+            subtitle_wrap = self._title_wrap(fig, cfg.subtitle, subtitle_fontsize)
 
         # If there's no legend, add title/subtitle and return
-        if legend == "none" or not labels:
+        if legend_pos == "none" or not labels:
             if cfg.title:
                 fig.suptitle(title_wrap, fontsize=title_fontsize)
             if cfg.subtitle:
-                ax.set_title(subtitle_wrap, fontsize=subtitle_fontsize)
+                axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
             fig.tight_layout()
             fig.canvas.draw()
             return
-        
+
+        # Wrap legend labels for right-side legends
+        if legend_pos == "right" and labels:
+            labels = list(self._legend_wrap(fig, labels))
+
         # Default legend title to group_by if not explicitly set
         if cfg.legend_label is None and cfg.group_by is not None:
             cfg.legend_label = cfg.group_by
-
+        
         # Create a temporary legend and title to measure required space
-        ncol = self._legend_ncol(fig, ax, legend_pos=legend)
+        ncol = self._legend_ncol(fig, axes[0], legend_pos=legend_pos)
         temp_legend = fig.legend(handles, labels, ncol=ncol, loc="upper right", title=cfg.legend_label or None)
         if cfg.title:
             temp_title = fig.text(0, 1, title_wrap, fontsize=title_fontsize)
@@ -1350,22 +1383,22 @@ class ChartMonkey:
             temp_title.remove()
         else:
             title_height = 0
-        
+
         # Expand the figure to accomodate the legend and title
-        if cfg.resize_fig: # TODO: consider removing this and/or test if False and/or consider if any of the later sections should fall into this conditional
-            if legend == "right":
+        if cfg.resize_fig:
+            if legend_pos == "right":
                 new_fig_width = fig_width + legend_width
                 new_fig_height = fig_height + title_height
-            elif legend == "bottom":
+            elif legend_pos == "bottom":
                 new_fig_width = fig_width
                 new_fig_height = fig_height + legend_height + title_height
             fig.set_size_inches(new_fig_width, new_fig_height)
-            fig.canvas.draw() # TODO: test removing this line
+            fig.canvas.draw()
 
         # Determine the position of the legend (loc, bbox) and reserve legend/title space using tight_layout rect
         # rect : tuple (left, bottom, right, top), default: (0, 0, 1, 1)
         # "A rectangle in normalized figure coordinates into which the whole subplots area (including labels) will fit.""
-        if legend == "right": # right legend
+        if legend_pos == "right": # right legend
             loc = "center right"
             bbox = (1.0, 0.5)
             rect = [0, 0, 1 - legend_width / new_fig_width, 1 - title_height / new_fig_height]
@@ -1374,16 +1407,27 @@ class ChartMonkey:
             bbox = (0.5, 0.0)
             rect = [0, legend_height / new_fig_height, 1, 1 - title_height / new_fig_height]
 
-        # Add subtitle and use tight_layout to finalise axes position
+        # Put subtitle on the first axes
         if cfg.subtitle:
-            ax.set_title(subtitle_wrap, fontsize=subtitle_fontsize)
+            axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
         fig.tight_layout(rect=rect)
+
+        # Center suptitle over the union of axes
         if cfg.title:
-            # Adjust x coordinate of title to center it over the axes
-            axes_box = ax.get_position()
-            title_x = axes_box.x0 + axes_box.width / 2.0
+            boxes = [a.get_position() for a in axes]
+            x0 = min(b.x0 for b in boxes); x1 = max(b.x1 for b in boxes)
+            title_x = x0 + (x1 - x0) / 2.0
             fig.suptitle(title_wrap, fontsize=title_fontsize, x=title_x)
-        fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox, title=cfg.legend_label or None)
+
+        # Add final legend in the reserved area
+        if legend_pos != "none" and labels:
+            ncol = self._legend_ncol(fig, axes[0], legend_pos)
+            if legend_pos == "right":
+                loc, bbox = "center right", (1.0, 0.5)
+            else:  # bottom
+                loc, bbox = "lower center", (0.5, 0.0)
+            fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox, title=cfg.legend_label or None)
+
         fig.canvas.draw()
 
 # -----------------------------------------------------------------------------
@@ -1490,6 +1534,47 @@ class ChartMonkey:
 # Chart Primitives                                                           
 # -----------------------------------------------------------------------------
 
+    def _save_and_return(self, fig, ax, chart_data) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
+        cfg = self._chart_params
+        if cfg.save_path:
+            fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
+        if cfg.show_fig:
+            plt.show()
+        if cfg.return_values or not cfg.show_fig:
+            return fig, ax, chart_data
+        else:
+            return None
+
+    def _chart_pipeline(
+        self,
+        plot_fn: Callable[[pd.DataFrame, Optional[Axes]], tuple[Figure, Axes, pd.DataFrame]],
+        *,
+        ax: Optional[Axes] = None,
+        finalize: bool = True,
+        hide_axis_labels: bool = False,
+        **kwargs: Any,
+    ) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
+        """
+        Common logic for all charts: set params -> aggregate -> sort -> plot using plot_fn chart primitive -> style axes -> (optional) style fig -> save/return.
+        When finalize=False, skips figure-level styling and save/show for parent containers like compare().
+        """
+        self._set_params(**kwargs)                                  # ChartConfig on instance
+        df_long = self._sort(self._aggregate_data())                # tidy long-form (x, group_by, value)
+        fig, ax, chart_data = plot_fn(df_long, ax=ax)               # delegate to primitive (handles pivot & draw)
+
+        # Axis-only styling (labels, limits, tick format, grid, benchmarks, etc.)
+        self._style_axes(fig, ax, chart_data)
+
+        if hide_axis_labels:
+            ax.set_xlabel(""); ax.set_ylabel("")
+
+        if finalize:
+            self._style_fig(fig, [ax])                              # shared legend/title, tight layout
+            return self._save_and_return(fig, ax, chart_data)       # obeys save_path, show_fig, return_values
+        else:
+            # For parent flow (e.g., compare), just return the pieces without saving/showing.
+            return fig, ax, chart_data
+
     # TODO: work through the list of options in .plot and wrap them into this framework
     # 'line', 'bar', 'barh', 'hist', 'box', 'kde', 'density', 'area', 'pie', 'scatter', 'hexbin'
 
@@ -1585,56 +1670,68 @@ class ChartMonkey:
         return fig, ax, chart_data
 
 # -----------------------------------------------------------------------------
-# Public API                                                           
+# Public APIs                                                           
 # -----------------------------------------------------------------------------
 
-    def _save_and_return(self, fig, ax, chart_data) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
-        cfg = self._chart_params
-        if cfg.save_path:
-            fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
-        if cfg.show_fig:
-            plt.show()
-        if cfg.return_values or not cfg.show_fig:
-            return fig, ax, chart_data
-        else:
-            return None
-
     @add_docstring(COMMON_DOCSTRING)
-    def bar(self, **kwargs: Any) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
+    def bar(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
         """Bar chart (counts by default, aggregate `y` when provided)."""
-
-        self._set_params(**kwargs)
-        chart_data = self._aggregate_data()
-        chart_data = self._sort(chart_data)
-        fig, ax, chart_data = self._bar(chart_data)
-        self._apply_common_style(fig, ax, chart_data)
-        self._finalise_layout(fig, ax)
-        return self._save_and_return(fig, ax, chart_data)
+        return self._chart_pipeline(self._bar, ax=ax, finalize=finalize, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
-    def line(self, **kwargs: Any) -> tuple[Figure, Axes]:
+    def line(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
         """Line chart. Requires `x`."""
-        self._set_params(**kwargs)
-        agg = self._sort(self._aggregate_data())
-        fig, ax, chart_data = self._line(agg)
-        self._apply_common_style(fig, ax, chart_data)
-        self._finalise_layout(fig, ax)
-        return self._save_and_return(fig, ax, chart_data)
+        return self._chart_pipeline(self._line, ax=ax, finalize=finalize, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
-    def pie(self, **kwargs: Any) -> tuple[Figure, Axes]:
+    def pie(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
         """Pie chart. Requires `names`+`values` (or `x` as names + counts)."""
-        self._set_params(**kwargs)
-        agg = self._sort(self._aggregate_data())
-        fig, ax, chart_data = self._pie(agg)
-        self._apply_common_style(fig, ax)
-        # hide axis labels
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        self._finalise_layout(fig, ax)
-        return self._save_and_return(fig, ax, chart_data)
-    
-# -----------------------------------------------------------------------------
-# Advanced charts
-# -----------------------------------------------------------------------------
+        # Pie uses axis-only labels; we hide axes labels explicitly as before.
+        return self._chart_pipeline(self._pie, ax=ax, finalize=finalize, hide_axis_labels=True, **kwargs)
 
+    @add_docstring(COMMON_DOCSTRING)
+    def compare(
+        self,
+        chart1: Callable[[Axes], None],
+        chart2: Callable[[Axes], None],
+        chart3: Optional[Callable[[Axes], None]] = None,
+        *,
+        sharey: bool = False,
+        **kwargs: Any,
+    ) -> tuple[Figure, Dict[str, Axes]]:
+        """Create a side-by-side figure (2 or 3 axes) from individual lazychart charts.
+
+        Each `chartX(ax)` should be a callable that draws onto the provided Axes,
+        ideally by calling a public method with `ax=ax, finalize=False`, e.g.:
+
+            lambda ax: cm.bar(ax=ax, data=df, x='...', y='...', finalize=False)
+
+        Figure-level config (title, legend position, fig_size, save/show) is taken from compare() kwargs.
+        Axis-level config comes from each chart's own call.
+        """
+        # 1) Compare-level config drives figure/title/legend/save/show
+        fig_cfg = self._set_params(**kwargs)
+
+        n = 3 if chart3 else 2
+        base_w, base_h = fig_cfg.fig_size                                  # use your unit fig_size
+        fig, axs = plt.subplots(1, n, figsize=(base_w * n, base_h), sharey=sharey)
+
+        # Map axes for user-friendly return
+        if n == 2:
+            axes: Dict[str, Axes] = {"D1": axs[0], "D2": axs[1]}
+        else:
+            axes = {"D1": axs[0], "D2": axs[1], "D3": axs[2]}
+
+        # 2) Delegate drawing to child charts (axis-only finalize=False)
+        # (note each of these may update self.chart_params...)
+        _, _, chart_data1 = chart1.render(self, axes["D1"])
+        _, _, chart_data2 = chart2.render(self, axes["D2"])
+        if chart3:
+            _, _, chart_data3 = chart3.render(self, axes["D3"])
+
+        # 3) Single shared legend/title/layout for all axes
+        # (...hence we overwrite these with the figure level settings before styling the figure)
+        self._chart_params = fig_cfg
+        self._style_fig(fig, list(axes.values()))
+        chart_data = [chart_data1, chart_data2] + ([chart_data3] if chart_data3 is not None else [])
+        self._save_and_return(fig, axes, chart_data)

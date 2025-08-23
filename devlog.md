@@ -340,30 +340,72 @@ I want to add in a compare chart which can compare two charts side-by-side (and 
 
     # ---- Side-by-side combo (restored semantics) -------------------------------
     @add_docstring(COMMON_DOCSTRING)
-    def combo(
+    def compare(
         self,
         chart1: Callable[[Axes], None],
         chart2: Callable[[Axes], None],
-        legend: Optional[str] = "right",
-        title: Optional[str] = None,
+        chart3: Optional[Callable[[Axes], None]], # only if it doesn't complicate things too much
         **kwargs: Any,
     ) -> tuple[Figure, Dict[str, Axes]]:
-        """Create a side-by-side figure and draw two user-supplied callables."""
-        # store style kwargs so grid/title etc. are respected when we finalise
-        cfg = self._set_params(legend=legend, title=title, **kwargs)
-        # Create 1x2 figure
-        fig, axs = plt.subplots(1, 2, figsize=(cfg.fig_size[0]*2, cfg.fig_size[1]))
-        axes = {"D1": axs[0], "D2": axs[1]}
+        """Create a side-by-side figure using individual lazychart charts (2 or 3)
+        as data axes, but with a shared legend and title (taken from first chart?)"""
 
-        # Apply per-chart palette (set on both)
-        if cfg.palette is not None:
-            colors = _resolve_palette(cfg.palette)
-            for a in axes.values():
-                a.set_prop_cycle(color=list(colors))
+        # TODO - this function needs to be developed
 
+        # see existing setup below:
+        if False:
+            # bar() for reference
+            def bar(self, **kwargs: Any) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
+                """Bar chart (counts by default, aggregate `y` when provided)."""
+
+                self._set_params(**kwargs)
+                chart_data = self._aggregate_data()
+                chart_data = self._sort(chart_data)
+                fig, ax, chart_data = self._bar(chart_data)
+                self._apply_common_style(fig, ax, chart_data)
+                self._finalise_layout(fig, ax)
+                return self._save_and_return(fig, ax, chart_data)
+
+            # _bar() for reference
+            def _bar(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
+                cfg = self._chart_params
+                fig, ax = self._ensure_fig_ax(ax)
+                chart_data = self._pivot_data(df)
+                labels_for_color = list(chart_data.columns) if cfg.group_by else [cfg.y or "value"]
+                chart_data.plot(kind="bar",
+                                stacked=(cfg.stacking != "none"),
+                                color=self._get_palette(labels_for_color),
+                                ax=ax,
+                                legend=False)
+                return fig, ax, chart_data
+        # - suggest we do the planned "Refactor to a common chart wrapper" goal alongside compare() dev
+        #   as we ideally want bar() to call _ensure_fig_ax and then pass the ax to _bar() to do the plot
+        #   then similarly we have compare() calls _ensure_fig_ax 2-3 times and can make multiple calls to 
+        #   _bar()/_line() etc to do plots on individual axes
+        # - suspect _bar() will call _apply_common_style (maybe rename this to _style_axes)
+        #   and bar()/compare() will call _finalise_layout (maybe rename this to _style_fig)
+        # - need to check that the _style_axes and _style_fig functions are working on axes and figs only respectively
+        #   may need to move things around to achieve this, or get into the details and confirm it's possible to do this way
+        # - need to consider how we coerce parameters from 2-3 charts and/or compare() kwargs outside the charts
+        #   we could e.g. only use params from the compare() level kwargs and ignore the underlying ones,
+        #   take only the params from the first chart, attempt to combine the params, take only the last chart etc
+        #   perhaps figure level > chart 1 > other charts blending hierarchy
+
+        # some existing code from prior attempts which may be useful, but we may also want to do things differently:        
+
+        # Create 1x2 (or 1x3) figure
+        if chart3:
+            fig, axs = plt.subplots(1, 3, figsize=(cfg.fig_size[0]*3, cfg.fig_size[1])) # not sure if cfg.fig_size exists
+            axes = {"D1": axs[0], "D2": axs[1], "D3": axs[2]}
+        else:
+            fig, axs = plt.subplots(1, 2, figsize=(cfg.fig_size[0]*2, cfg.fig_size[1]))
+            axes = {"D1": axs[0], "D2": axs[1]}
+        
         # Draw charts
         chart1(axes["D1"])
         chart2(axes["D2"])
+        if chart3:
+            chart3(axes["D3"])
 
         # Collect legend entries across axes
         handles, labels = [], []
@@ -372,19 +414,7 @@ I want to add in a compare chart which can compare two charts side-by-side (and 
             handles += h
             labels += l
 
-        # Apply common styling on both axes
-        for a in axes.values():
-            self._apply_common_style(a)
-
-        # finalise multi-axes layout
-        self._finalise_layout_multi(fig, axes, handles, labels)
-
-        if cfg.save_path:
-            fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
-        if cfg.show_fig:
-            plt.show()
-
-        return fig, axes
+        return fig, axes, chart_data # need to consider if chart_data here is a dict or list of chart data from the underlying chart primitives
 
     # ---- Delay chart ----------------------------------------------------------
     @add_docstring(COMMON_DOCSTRING)
@@ -597,4 +627,25 @@ def pie():
 ### Prompt playground
 
 Help me decide what to work on next. My options are:
-1. Implement a new comparison() chart type which places 2 charts next to each other (and possibly 3) with a shared axis. I've been trying to structure my code to make this easier (e.g. )
+
+1. Implement a new comparison() chart type which places 2 charts next to each other (and possibly 3) with a shared legend. I've been trying to structure my code to make this easier (e.g. _ensure_fig_ax accepts an existing ax and adds the extra one on), but I fear it will be a lot harder than I expect and may involve some major refinements. I want to do this sooner rather than later as it feels like one of the last major hurdles before I can move on to easier things such as adding in new chart types. I have some old code that attempted to implement this, which we could build on, or we could start from scratch, perhaps with me giving a clean docstring to explain what the function is intended to do.
+
+2. I've recently implemented a bunch of things and I should go through and test these. I have a demo_usage.ipynb where I've been doing this. It probably wouldn't take too long and wouldn't be too hard to do this, but it also probably won't add much to the library assuming it's all been implemented well.
+
+3. I have a pretty ordinary README file at the moment. I could update this. One specific thing I want to do is to take the ChartMonkey methods and parameters in COMMON_DOCSTRING and create a nice markdown formatted version to include in the README. This won't change the functionality of my package but will make it more accessible. However, as I'm continuing to add and update things I'll need to rework this, so there's some duplication of effort and arguably less immediate value than actually creating functional code.
+
+4. My core.py file is getting quite large. I like having it in one file as it's quite easy to e.g. upload to ChatGPT for advice or transfer to work to put it through its paces, but at some point I suspect I'll end up splitting this into individual modules. This feels like a pretty major exercise, which I want to do before v1.0.0 but probably want to defer until things are a bit more stable. It feels like we're getting close, but I fear the comparison() update above may result in some significant changes.
+
+5. I had an idea that it might be good to have a chart wrapper that applies for essentially all of the chart types. At present there's a lot of duplication between them in the stages they go through. It would be good to centralise this logic somewhere so e.g. bar() -> run common code -> as part of this run chart-specific code using a kind='bar' sort of argument and perhaps this _bar or perhaps it's in addition to it / somewhere along the line we need to call the specific bar plot method -> any other general stuff like saving figures and so on. Again, this feels like it could be a somewhat major refactor but perhaps limited to the primitives/api area at the bottom.
+
+6. At the moment I have spent most of my time implementing and testing bar(). Another fundamental chart type is line() and I could spend some time in my demo_usage.ipynb exploring this. I think at some point I'll want this and feel embarrassed if it's not implemented, and I suspect in testing it I may encounter things that need to be updated in the data manipulation areas which I'm keen to lock down once they're "tried and tested".
+
+7. I have a few specific charts in mind. It feels like these have to wait for items above, but I'm quite keen to get them implemented as a way of testing the above, and because I think they'll be particularly useful. Similar to comparison() I have some old code that attempted to implement this, which we could build on, or we could start from scratch, perhaps with me giving a clean docstring to explain what the function is intended to do:
+
+7a. A "delay" chart. This takes a date or column of dates and then differences with another column of dates to get delays. Then a line chart is used to plot the "distribution" of whatever we're looking at in time delay relative to the (fixed or per row) starting date.
+
+7b. A "mix" comparison chart. This has some sort of ratio on the left side (e.g. mean levels by category) and has the frequency chart on the right side (i.e. remove the y column from the spec so you get row counts instead).
+
+8. Looking through my code for "TODO" comments that I've left lying around, looking at the different standard plot "kind" options and adding more functionality based on what I find.
+
+What order would you approach these options in and why?

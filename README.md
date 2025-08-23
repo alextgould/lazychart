@@ -52,3 +52,7 @@ x/y have corresponding git tags e.g.
 git tag -a v0.1.0 -m "0.1.0: post-refactor, tests passing"
 git push && git push --tags
 ```
+
+## 
+
+TODO: add key methods and parameters
