@@ -278,7 +278,8 @@ def example_data(
         "emotion": pd.Categorical(emotion, categories=["sad", "neutral", "happy"], ordered=True),
     })
 
-    # Helpful calendar categoricals
+    # Calendar categoricals
     df["weekday"] = df["date"].dt.day_name()
+    df["month"] = df["date"].dt.to_period("M").astype(str)
 
     return df

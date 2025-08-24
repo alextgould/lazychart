@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
 from matplotlib import rcParams
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -604,6 +605,7 @@ def _resolve_fontsize(size: Union[int, str, None], label: str) -> int:
     return FONT_PRESETS["medium"][label] # use medium by default
 
 def _format_axis(ax: Axes, which: str, fmt: AxisFormat, decimals: int) -> None:
+    """Apply percent, comma and short formats if requested"""
     axis = ax.yaxis if which == "y" else ax.xaxis
     if fmt == "percent":
         axis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=decimals))
@@ -1041,16 +1043,21 @@ class ChartMonkey:
         """
 
         cfg = self._chart_params
+
         # x ordering
         if cfg.x and (cfg.x in df.columns):
-            order_x = self._resolve_sort_order(df, target=cfg.x, strategy=cfg.sort_x, ascending=cfg.sort_x_ascending)
-            if len(order_x):
-                if cfg.x_period: # Time-like: keep dtype, sort chronologically
-                    asc = True if cfg.sort_x_ascending is None else bool(cfg.sort_x_ascending)
-                    df = df.sort_values(cfg.x, ascending=asc)
-                else: # Nominal: enforce explicit order via ordered Categorical
+            # treat as time if x_period is set OR the dtype is already datetime/period
+            is_time = bool(cfg.x_period) or pd.api.types.is_datetime64_any_dtype(df[cfg.x]) or isinstance(df[cfg.x].dtype, pd.PeriodDtype)
+            if is_time:
+                asc = True if cfg.sort_x_ascending is None else bool(cfg.sort_x_ascending)
+                df = df.sort_values(cfg.x, ascending=asc)
+            else:
+                # nominal - enforce explicit order via ordered Categorical
+                order_x = self._resolve_sort_order(df, target=cfg.x, strategy=cfg.sort_x, ascending=cfg.sort_x_ascending)
+                if len(order_x):
                     df[cfg.x] = pd.Categorical(df[cfg.x], categories=list(order_x), ordered=True)
                     df = df.sort_values(cfg.x)
+
         # group_by ordering
         if cfg.group_by and (cfg.group_by in df.columns):
             order_g = self._resolve_sort_order(df, target=cfg.group_by, strategy=cfg.sort_group_by, ascending=cfg.sort_group_by_ascending)
@@ -1058,6 +1065,7 @@ class ChartMonkey:
                 df[cfg.group_by] = pd.Categorical(df[cfg.group_by], categories=list(order_g), ordered=True)
                 by_cols = [c for c in [cfg.group_by, cfg.x] if c and c in df.columns]
                 df = df.sort_values(by_cols)
+
         # names ordering (pie)
         if cfg.names and (cfg.names in df.columns):
             order_n = self._resolve_sort_order(df, target=cfg.names, strategy=cfg.sort_names, ascending=cfg.sort_names_ascending)
@@ -1078,8 +1086,9 @@ class ChartMonkey:
             fig, ax = plt.subplots(figsize=self._chart_params.fig_size)
             return fig, ax
 
-    def _auto_rotate_xticks(self, ax: Axes) -> None:
-        """Default to 90° for long labels, but keep short labels horizontal."""
+    def _rotate_xticks(self, ax: Axes) -> None:
+        """Apply rotation as requested by the user.
+        For the x axis, default to 90° for long labels and horizontal for short labels."""
         cfg = self._chart_params
         if cfg.xtick_rotation is None:
             labels = [str(t.get_text()) for t in ax.get_xticklabels()]
@@ -1097,7 +1106,7 @@ class ChartMonkey:
                 label.set_rotation(cfg.ytick_rotation)
 
     def _format_xperiod_labels(self, idx: pd.DatetimeIndex) -> list[str]:
-        """Return human-friendly labels for x_period-driven datetime indexes."""
+        """Return human-friendly labels for x_period-driven datetime indexes with bar charts."""
         cfg = self._chart_params
         if not cfg.x_period or not isinstance(idx, pd.DatetimeIndex):
             return [str(x) for x in idx]
@@ -1119,42 +1128,66 @@ class ChartMonkey:
 
         return [str(x) for x in idx]
     
-    def _add_benchmark(self, ax: Axes):
+    def _add_benchmark(self, ax: Axes, chart_data: pd.DataFrame):
         """Adds a benchmark line"""
         cfg = self._chart_params
 
-        # Benchmark horizontal line
+        # Horizontal line
         if cfg.target_y is not None:
-            ax.axhline(
-                y=cfg.target_y,
-                linestyle="--",
-                color="black",
-                linewidth=1,
-                label=cfg.target_y_label or None,
-            )
+            ax.axhline(y=cfg.target_y, linestyle="--", color="black", linewidth=1, label=cfg.target_y_label or None)
 
-        # Benchmark vertical line
+        # Vertical line
         if cfg.target_x is not None:
-            ax.axvline(
-                x=cfg.target_x,
-                linestyle="--",
-                color="black",
-                linewidth=1,
-                label=cfg.target_x_label or None,
-            )
+            idx = chart_data.index
+            tx = None
+            
+            # datetime - coerce to target_x datetime
+            if isinstance(idx, pd.DatetimeIndex):
+                try:
+                    tx = pd.to_datetime(cfg.target_x)
+                except Exception:
+                    tx = None
+
+            # categorical/object index - map to ordinal position
+            elif cfg.target_x in chart_data.index:
+                tx = int(idx.get_loc(cfg.target_x))
+
+            # categorical/object index as str - map to ordinal position
+            elif str(cfg.target_x) in chart_data.index:
+                tx = int(idx.get_loc(str(cfg.target_x)))
+            
+            # onus is on the caller to figure this out
+            else:
+                tx = cfg.target_x
+                
+            if tx is not None:
+                ax.axvline(x=tx, linestyle="--", color="black", linewidth=1, label=cfg.target_x_label or None)
 
     def _style_axes(self, fig: Figure, ax: Axes, chart_data: Optional[pd.DataFrame] = None):
         """Apply axis labels, axis limits, axis formats, tick rotation, grid"""
         cfg = self._chart_params
 
-        # Axis labels
+        # x axis label
         if cfg.x_label: # use the user passed label with priority
             ax.set_xlabel(cfg.x_label)
         elif cfg.x_label == '': # allow user to pass '' to suppress the label
             pass
         elif cfg.x is not None: # automatically use the x variable as the label
-            ax.set_xlabel(str(cfg.x))
+            if cfg.x_period:
+                if cfg.x_period == "Q":
+                    ax.set_xlabel(f"Quarter ({cfg.x})")
+                elif cfg.x_period == "M":
+                    ax.set_xlabel(f"Month ({cfg.x})")
+                elif cfg.x_period == "Y":
+                    ax.set_xlabel(f"Year ({cfg.x})")
+                elif isinstance(cfg.x_period, str) and cfg.x_period.startswith("W-"):
+                    ax.set_xlabel(f"Week ({cfg.x})")
+                else:
+                    ax.set_xlabel(f"{cfg.x_period} ({cfg.x})")
+            else:
+                ax.set_xlabel(str(cfg.x))
         
+        # y axis label
         if cfg.y_label: # use the user passed label with priority
             ax.set_ylabel(cfg.y_label)
         elif cfg.y_label == '': # allow user to pass '' to suppress the label
@@ -1176,26 +1209,98 @@ class ChartMonkey:
         for tick in ax.get_xticklabels() + ax.get_yticklabels():
             tick.set_fontsize(_resolve_fontsize(cfg.tick_size, 'tick'))
 
-        # Ranges
-        if cfg.x_min is not None or cfg.x_max is not None:
-            ax.set_xlim(left=cfg.x_min if cfg.x_min is not None else ax.get_xlim()[0],
-                        right=cfg.x_max if cfg.x_max is not None else ax.get_xlim()[1])
+        # Apply percent, comma and short formats if requested
+        _format_axis(ax, "x", cfg.x_axis_format, cfg.decimals)
+        _format_axis(ax, "y", cfg.y_axis_format, cfg.decimals)
+
+        # Index min/max range, including individual treatment for date/categorical/numeric x axis 
+        idx = chart_data.index
+        is_dt = isinstance(idx, pd.DatetimeIndex)
+        is_cat = (not is_dt) and (idx.dtype == object or pd.api.types.is_categorical_dtype(idx))
+
+        if is_dt: # datetime x
+            def _as_dt(v):
+                if v is None:
+                    return None
+                try:
+                    return pd.to_datetime(v)
+                except Exception:
+                    return v
+            x_min, x_max = _as_dt(cfg.x_min), _as_dt(cfg.x_max)
+
+        elif is_cat: # categorical - map to ordinal positions (0..N-1)
+            def _cat_pos(v):
+                if v is None:
+                    return None
+                if v in idx:
+                    return int(idx.get_loc(v))
+                if str(v) in idx:
+                    return int(idx.get_loc(str(v)))
+                return None
+            
+            # add a margin on either side
+            x_min, x_max = _cat_pos(cfg.x_min), _cat_pos(cfg.x_max)
+            if x_min is None:
+                x_min = 0
+            if x_max is None:
+                x_max = len(idx) - 1
+            x_min = x_min - 0.5
+            x_max = x_max + 0.5
+
+        else:
+            # numeric axis
+            def _as_num(v):
+                if v is None:
+                    return None
+                try:
+                    return float(v)
+                except Exception:
+                    return v
+            x_min, x_max = _as_num(cfg.x_min), _as_num(cfg.x_max)
+
+        if x_min is not None or x_max is not None:
+            ax.set_xlim(left=x_min if x_min is not None else ax.get_xlim()[0],
+                        right=x_max if x_max is not None else ax.get_xlim()[1])
         if cfg.y_min is not None or cfg.y_max is not None:
             ax.set_ylim(bottom=cfg.y_min if cfg.y_min is not None else ax.get_ylim()[0],
                         top=cfg.y_max if cfg.y_max is not None else ax.get_ylim()[1])
 
-        # Numeric formatting
-        _format_axis(ax, "x", cfg.x_axis_format, cfg.decimals)
-        _format_axis(ax, "y", cfg.y_axis_format, cfg.decimals)
+        # x ticks
+        # use set_xticks and set_xticklabels rather than locators and formatters
+        # as the former feels better with our tentency to pre-summarise data (guaranteed tick for each point)
+        # and seems to be more reliable (no odd 1970 epoch formatting issues)
+        if is_dt:
+            if cfg.x_period:
+                if ax.lines: # Line chart → keep datetime positions, use locators + formatters
+                    ax.set_xticks(idx)
+                    if cfg.x_period == "Q":
+                        ax.set_xticklabels([f"{d.year}Q{((d.month-1)//3)+1}" for d in idx])
+                    elif cfg.x_period == "M":
+                        ax.set_xticklabels([d.strftime("%b %y") for d in idx])
+                    elif cfg.x_period == "Y":
+                        ax.set_xticklabels([d.strftime("%Y") for d in idx])
+                    elif isinstance(cfg.x_period, str) and cfg.x_period.startswith("W-"):
+                        ax.set_xticklabels([d.strftime("%d %b %y").lstrip("0") for d in idx])
+                    else:  # Day or anything unusual → fall back
+                        ax.set_xticklabels([d.strftime("%d %b %y").lstrip("0") for d in idx])
 
-        # Pretty x-period tick labels
-        if cfg.x_period and chart_data is not None and isinstance(chart_data.index, pd.DatetimeIndex):
-            new_labels = self._format_xperiod_labels(chart_data.index)
-            ax.set_xticks(np.arange(len(new_labels))) # avoid "FixedFormatter without FixedLocator" warning: set tick positions before labels
-            ax.set_xticklabels(new_labels)
-    
-        # Tick rotation + grid
-        self._auto_rotate_xticks(ax)
+                else: # bar chart → ordinal bins
+                    new_labels = self._format_xperiod_labels(chart_data.index)
+                    locs = np.arange(len(new_labels))
+                    ax.set_xticks(locs)
+                    ax.set_xticklabels(new_labels)
+
+            else: # No x_period
+                loc = mdates.AutoDateLocator()
+                ax.xaxis.set_major_locator(loc)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+
+        #ax.margins(x=0.02)
+        
+        # Tick rotation
+        self._rotate_xticks(ax)
+
+        # Grid
         if cfg.grid_x:
             ax.grid(True, axis="x", linestyle="--", alpha=0.4)
         else:
@@ -1205,8 +1310,8 @@ class ChartMonkey:
         else:
             ax.grid(False, axis="y")
 
-        # Benchmark lines
-        self._add_benchmark(ax)
+        # Target/benchmark lines
+        self._add_benchmark(ax, chart_data)
 
         return fig, ax
     
@@ -1609,12 +1714,10 @@ class ChartMonkey:
 
         # Long -> wide (and handle gaps/percent if configured)
         chart_data = self._pivot_data(df)
+        chart_data = chart_data.mask(chart_data.eq(0)) # prefer gaps in lines where no data exists
 
         labels_for_color = list(chart_data.columns) if chart_data.shape[1] > 1 else ["value"]
-        chart_data.plot(ax=ax,
-                        marker="o",
-                        color=self._get_palette(labels_for_color),
-                        legend=False)
+        chart_data.plot(ax=ax, marker="o", color=self._get_palette(labels_for_color), legend=False)
 
         return fig, ax, chart_data
 

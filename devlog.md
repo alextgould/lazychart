@@ -1,3 +1,19 @@
+# To Do
+
+## High priority
+
+* 
+
+## Medium priority
+
+* 
+
+## Low priority
+
+* 
+
+
+
 # Prompt history
 
 ## First "impossible prompt" for GPT-5
@@ -302,7 +318,9 @@ Then just tag v0.1.0; your wheels/install will carry that version (and dev build
 ```
 
 
-### Current fix requests
+# Priorities
+
+## Current fix requests
 
 #### Think added but need to check with demo_usage
 
@@ -706,3 +724,8 @@ I want to make as many of the following changes as possible:
 
 7. At present the "emotion" category is a function of the hidden "engaged" "energetic" "happy" scales. I think we replace this with a simple "happy" "neutral" "sad" classification based on a hideen energy_score and/or a few simple rules. For example, perhaps any time work_stress is higher than a given threshold or sleep_hours is less than a given threshold then emotion is "sad". I want there to be a good mix of emotions coming out of the end of this process.
 
+
+
+### Things to pondor on later
+
+* Something something ChartParams should / shouldn't be responsible for coercing values? Might be OK as we always create a new ChartParams when we set values and always set values before we chart, but just at the minute I'm pondering whether making x_min/x_max datetime-friendly within the place where we set_xlim isn't ideal and we should be doing it earlier, but unsure if this would be within ChartParams or 
