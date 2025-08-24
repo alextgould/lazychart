@@ -708,31 +708,6 @@ class ChartMonkey:
         return config
 
 # -----------------------------------------------------------------------------
-# Sample Data 
-# -----------------------------------------------------------------------------
-
-    def example_data(self, n: int = 2000, seed: int = 42) -> pd.DataFrame:
-        """Return a synthetic wellness dataset for demos/tests."""
-        np.random.seed(seed)
-        dates = pd.date_range(end=pd.Timestamp.today(), periods=n)
-        user = np.random.choice([f'user{i}' for i in range(1, 51)], size=n)
-        sleep_hours = np.clip(np.random.normal(7, 1, n), 4, 10)
-        steps = np.clip(np.random.normal(6000, 1500, n), 200, 15000)
-        alcohol = np.clip(np.random.poisson(1.2, n), 0, 8)
-        work_stress = np.clip(np.random.normal(5, 2, n), 0, 10)
-        nutrition = np.clip(np.random.normal(6.5, 1.5, n), 0, 10)
-        score = (0.4*sleep_hours + 0.001*steps - 0.5*alcohol +
-                 0.3*nutrition - 0.2*work_stress + np.random.normal(0, 1, n))
-        emotion = pd.cut(score, bins=[-10, -0.5, 0.5, 10], labels=['Engaged', 'Energetic', 'Happy'])
-        df = pd.DataFrame(dict(
-            date=dates, user=user, sleep_hours=sleep_hours, steps=steps,
-            alcohol=alcohol, work_stress=work_stress, nutrition=nutrition,
-            score=score, predicted_emotion=emotion))
-        df['month'] = df['date'].dt.to_period('M').astype(str)
-        df['weekday'] = df['date'].dt.day_name()
-        return df
-
-# -----------------------------------------------------------------------------
 # Core Data Logic                                                           
 # -----------------------------------------------------------------------------
 

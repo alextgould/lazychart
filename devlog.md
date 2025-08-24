@@ -661,3 +661,48 @@ Module split – structure for v1.0.
 Specialized charts (delay, mix, etc.) – build on strong foundations.
 TODO sweeps / extras – ongoing polish.
 ```
+
+
+### Example data rework
+
+I am developing a charting package and within the main class I have a function which generates example data to be used in testing and demonstrating the package. It's currently a bit ordinary and I'd like your assistance with improving it. Here's the current version:
+
+    def example_data(self, n: int = 2000, seed: int = 42) -> pd.DataFrame:
+        """Return a synthetic wellness dataset for demos/tests."""
+        np.random.seed(seed)
+        dates = pd.date_range(end=pd.Timestamp.today(), periods=n)
+        user = np.random.choice([f'user{i}' for i in range(1, 51)], size=n)
+        sleep_hours = np.clip(np.random.normal(7, 1, n), 4, 10)
+        steps = np.clip(np.random.normal(6000, 1500, n), 200, 15000)
+        alcohol = np.clip(np.random.poisson(1.2, n), 0, 8)
+        work_stress = np.clip(np.random.normal(5, 2, n), 0, 10)
+        nutrition = np.clip(np.random.normal(6.5, 1.5, n), 0, 10)
+        score = (0.4*sleep_hours + 0.001*steps - 0.5*alcohol +
+                 0.3*nutrition - 0.2*work_stress + np.random.normal(0, 1, n))
+        emotion = pd.cut(score, bins=[-10, -0.5, 0.5, 10], labels=['Engaged', 'Energetic', 'Happy'])
+        df = pd.DataFrame(dict(
+            date=dates, user=user, sleep_hours=sleep_hours, steps=steps,
+            alcohol=alcohol, work_stress=work_stress, nutrition=nutrition,
+            score=score, predicted_emotion=emotion))
+        df['month'] = df['date'].dt.to_period('M').astype(str)
+        df['weekday'] = df['date'].dt.day_name()
+        return df
+
+I want to make as many of the following changes as possible:
+
+1. Add a docstring which explains the "scenario" and also the relevance (i.e. provide a rich set of data that can be used for testing and demonstration purposes, including numeric data, categorical data with low and high cardinality, temporal data, correlated data etc). The scenario is something along the lines of lifestyle data being collected for a range of users of a new lifestyle monitoring gadget. We might want to list out the relevant factors and/or group them - mindset is constant and comes from a personality survey when they join - start and end date indicate their participation period, lifestyle factors include sleep hours, exercise steps, standard drinks of alcohol consumed, work stress on a 0-10 scale, nutrition quality on a 0-10 scale. Within the code itself, include inline comments where relevant to make it easier to see how the data is being generated.
+
+2. Add a global_trend parameter (not shown in the final dataset) which is set up front and which will influences all users (e.g. N(0,1)). For example, when plotting alcohol usage over time, I might expect to see this increasing on average if global_trend is negative. In general we can assume that work_stress and alcohol are "negative" and steps, sleep_hours and nutrition are "positive".
+
+3. Add a season parameter (not shown in the final dataset) which is based on the quarter of the year (1, 2, 3, 4)
+
+3. Add age_band (shown in the final dataset), based on a uniform distribution between 20 and 80 and binned to 5 year groups.
+
+4. Add mindset, which is randomly "growth" "neutral" or "fixed" (shown in the final dataset). While these labels are evident in the data, under the hood, these labels will drive a trend factor which will mean these three groups have a different trajectory over time.
+
+5. Add "start_date" and "end_date" using some sort of generating process that results in some users only having data for part of the period. This could be perhaps a normal distribution with a mean which is today-n/2 and a stdev that means a lot of the users will have start_date < today-n and end_date > today, which will then be capped at start_date and end_date respectively. From memory with a normal distribution 2 standard deviations is around 96% so perhaps we aim for around 1.5 standard deviations of the distribution covering the start_date - n to start_date period.
+
+6. Rethink each of the individual components and add some sensible correlations. In general there should be some reliance on the global trend parameter, some reliance on the individual mindset, and some randomness, for which the existing distributions might be useful. At the moment, score is a function of the individual components and score drives the overall emotion, but I'm thinking we might want to add some correlations along the way by generating these in sequence based on how out of the user's control they would be e.g. global_trend > mindset > work_stress > alcohol > sleep_hours > steps > nutrition > emotion. So for example, the mean of the alcohol distribution might depend on global_trend and mindset, nutrition could depend on alcohol, sleep_hours and steps etc.
+
+7. At present the "emotion" category is a function of the hidden "engaged" "energetic" "happy" scales. I think we replace this with a simple "happy" "neutral" "sad" classification based on a hideen energy_score and/or a few simple rules. For example, perhaps any time work_stress is higher than a given threshold or sleep_hours is less than a given threshold then emotion is "sad". I want there to be a good mix of emotions coming out of the end of this process.
+
