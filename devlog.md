@@ -2,15 +2,26 @@
 
 ## High priority
 
-* 
+* test/debug compare charts, pie charts
 
 ## Medium priority
 
-* 
+* look through code for "TODO" comments that I've left lying around and put them in this list
+* look at the different standard plot "kind" options and add them to this list
+* "delay" chart. This takes a date or column of dates and then differences with another column of dates to get delays. Then a line chart is used to plot the "distribution" of whatever we're looking at in time delay relative to the (fixed or per row) starting date.
+* "mix" comparison chart. This has some sort of ratio on the left side (e.g. mean levels by category) and has the frequency chart on the right side (i.e. remove the y column from the spec so you get row counts instead).
+* test/build help() style functions to print out docstrings
+* update README, including markdown formatted tables of functions/arguments
+* update docstrings for bar() pie() etc, particularly with specific methods that may also be included in common docstring at present (split them)
 
 ## Low priority
 
-* 
+* consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
+* split code into separate modules (as late as possible pre v1.0.0)
+
+
+
+
 
 
 
@@ -724,8 +735,3 @@ I want to make as many of the following changes as possible:
 
 7. At present the "emotion" category is a function of the hidden "engaged" "energetic" "happy" scales. I think we replace this with a simple "happy" "neutral" "sad" classification based on a hideen energy_score and/or a few simple rules. For example, perhaps any time work_stress is higher than a given threshold or sleep_hours is less than a given threshold then emotion is "sad". I want there to be a good mix of emotions coming out of the end of this process.
 
-
-
-### Things to pondor on later
-
-* Something something ChartParams should / shouldn't be responsible for coercing values? Might be OK as we always create a new ChartParams when we set values and always set values before we chart, but just at the minute I'm pondering whether making x_min/x_max datetime-friendly within the place where we set_xlim isn't ideal and we should be doing it earlier, but unsure if this would be within ChartParams or 

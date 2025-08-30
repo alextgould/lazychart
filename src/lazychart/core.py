@@ -14,6 +14,7 @@ from matplotlib.axes import Axes
 from matplotlib.font_manager import FontProperties
 from textwrap import wrap
 from math import ceil
+from difflib import get_close_matches
 
 # Logging
 from lazychart.log import create_logger
@@ -326,6 +327,24 @@ def _normalize_kwargs(raw: Dict[str, Any]) -> Dict[str, Any]:
     # 5) Drop anything not part of ChartConfig (defensive)
     normalized = {k: v for k, v in normalized.items() if k in CANONICAL_KEYS}
 
+    # 6) Warn if something unexpected is passed
+    allowed = set(CANONICAL_KEYS) | set(ALIASES.keys()) | set(COMPOSITE_ALIASES.keys()) | {
+        # also allow these “entry” names that normalize elsewhere:
+        "legend", "legend_pos", "legend_position", "loc", "barmode"
+    }
+    unknown = [k for k in kw.keys() if k not in allowed]
+    if unknown:
+        suggestions = []
+        universe = list(CANONICAL_KEYS | set(ALIASES.values()) | set(ALIASES.keys()) | set(COMPOSITE_ALIASES.keys()))
+        for bad in unknown:
+            guess = get_close_matches(bad, universe, n=1)
+            if guess:
+                suggestions.append(f"`{bad}` (did you mean `{guess[0]}`?)")
+            else:
+                suggestions.append(f"`{bad}`")
+        msg = "Unsupported argument(s): " + ", ".join(suggestions)
+        logger.warning(msg)
+
     return normalized
 
 # -----------------------------------------------------------------------------
@@ -567,14 +586,15 @@ class ChartSpec:
             return ChartSpec(self._cm, name, kwargs)
         return _factory
 
-    def render(self, ax: Axes):
+    def render(self, ax: Axes, **overrides):
         """API for drawing onto a Matplotlib Axes using the corresponding
         public method (e.g. `cm.bar`) with `finalize=False`
         
         Returns fig, ax, chart_data
         """
         method = getattr(self._cm, self.kind)
-        return method(ax=ax, finalize=False, **self.kwargs)
+        merged = {**overrides, **self.kwargs}  # child kwargs override compare-level
+        return method(ax=ax, finalize=False, **merged)
 
 # -----------------------------------------------------------------------------
 # Styling helpers
@@ -1195,7 +1215,14 @@ class ChartMonkey:
         elif cfg.y is None and cfg.group_by is None: # default label for counts
             ax.set_ylabel("Number of rows in data")
         elif cfg.y is not None: # use y variable if it exists
-            ax.set_ylabel(str(cfg.y))
+            agg = cfg.aggfunc
+            if agg is None:
+                ax.set_ylabel(str(cfg.y))
+            elif isinstance(agg, str):
+                ax.set_ylabel(f"{agg}({cfg.y})")
+            else:
+                name = getattr(agg, "__name__", "agg")
+                ax.set_ylabel(f"{name}({cfg.y})")
 
         # Axis label padding
         if ax.get_xlabel():
@@ -1661,6 +1688,7 @@ class ChartMonkey:
         ax: Optional[Axes] = None,
         finalize: bool = True,
         hide_axis_labels: bool = False,
+        style_axes: bool = True, 
         **kwargs: Any,
     ) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
         """
@@ -1672,15 +1700,23 @@ class ChartMonkey:
         fig, ax, chart_data = plot_fn(df_long, ax=ax)               # delegate to primitive (handles pivot & draw)
 
         # Axis-only styling (labels, limits, tick format, grid, benchmarks, etc.)
-        self._style_axes(fig, ax, chart_data)
+        if style_axes:
+            self._style_axes(fig, ax, chart_data)
 
         if hide_axis_labels:
-            ax.set_xlabel(""); ax.set_ylabel("")
+            ax.set_xlabel("")
+            ax.set_ylabel("")
 
         if finalize:
             self._style_fig(fig, [ax])                              # shared legend/title, tight layout
             return self._save_and_return(fig, ax, chart_data)       # obeys save_path, show_fig, return_values
         else:
+            # axes level subtitles
+            cfg = self._chart_params
+            if cfg.subtitle:
+                sub_fs = _resolve_fontsize(cfg.subtitle_size, "subtitle")
+                ax.set_title(self._title_wrap(fig, cfg.subtitle, sub_fs), fontsize=sub_fs)
+
             # For parent flow (e.g., compare), just return the pieces without saving/showing.
             return fig, ax, chart_data
 
@@ -1792,9 +1828,19 @@ class ChartMonkey:
 
     @add_docstring(COMMON_DOCSTRING)
     def pie(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
-        """Pie chart. Requires `names`+`values` (or `x` as names + counts)."""
+        """Pie chart. Requires `names`+`values` (or `x` as names + counts).
+        
+        Honors cfg.show_labels / cfg.show_percent.
+        """
+
+        # aliasing just for pies
+        if "values" not in kwargs and "x" in kwargs:
+            kwargs["values"] = kwargs.pop("x")
+        if "names" not in kwargs and "group_by" in kwargs:
+            kwargs["names"] = kwargs.pop("group_by")
+
         # Pie uses axis-only labels; we hide axes labels explicitly as before.
-        return self._chart_pipeline(self._pie, ax=ax, finalize=finalize, hide_axis_labels=True, **kwargs)
+        return self._chart_pipeline(self._pie, ax=ax, finalize=finalize, hide_axis_labels=True, style_axes=False, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
     def compare(
@@ -1820,6 +1866,19 @@ class ChartMonkey:
         Figure-level config (title, legend position, fig_size, save/show) is taken from compare() kwargs.
         Axis-level config comes from each chart's own call.
         """
+
+        # ensure individual charts are passed using cm.chart.x syntax and not cm.x syntax
+        def _check_spec(obj, name):
+            if not isinstance(obj, ChartSpec):
+                raise TypeError(
+                    f"compare(...): `{name}` must be built with cm.chart.<kind>(...). "
+                    f"You passed {type(obj).__name__}. Use cm.chart.bar(...) not cm.bar(...)."
+                )
+        _check_spec(chart1, "chart1")
+        _check_spec(chart2, "chart2")
+        if chart3 is not None:
+            _check_spec(chart3, "chart3")
+
         # Compare() function config drives figure/title/legend/save/show
         fig_cfg = self._set_params(**kwargs)
 
@@ -1829,14 +1888,14 @@ class ChartMonkey:
         fig, axes = plt.subplots(1, n, figsize=(base_w * n, base_h), sharey=sharey)
 
         # Draw child charts
-        _, _, chart_data1 = chart1.render(axes[0])
-        _, _, chart_data2 = chart2.render(axes[1])
+        _, _, chart_data1 = chart1.render(axes[0], **kwargs)
+        _, _, chart_data2 = chart2.render(axes[1], **kwargs)
         chart_data = [chart_data1, chart_data2]
         if chart3:
-            _, _, chart_data3 = chart3.render(axes[2])
+            _, _, chart_data3 = chart3.render(axes[2], **kwargs)
             chart_data.append(chart_data3)
 
         # Figure styling
         self._chart_params = fig_cfg
         self._style_fig(fig, axes)
-        self._save_and_return(fig, axes, chart_data)
+        return self._save_and_return(fig, axes, chart_data)
