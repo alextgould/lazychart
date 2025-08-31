@@ -1099,13 +1099,21 @@ class ChartMonkey:
 # Axes styling
 # -----------------------------------------------------------------------------
 
-    def _ensure_fig_ax(self, ax: Optional[Axes] = None) -> tuple[Figure, Axes]:
+    def _ensure_fig_ax(self, ax: Optional[Axes] = None, prefer_square: bool = False) -> tuple[Figure, Axes]:
         """Create an axes if one doesn't already exist."""
         if ax is not None:
             return ax.figure, ax
+        
+        cfg = self._chart_params
+        base_w, base_h = cfg.fig_size
+        if prefer_square:
+            s = min(base_w, base_h)
+            figsize = (s, s)
         else:
-            fig, ax = plt.subplots(figsize=self._chart_params.fig_size)
-            return fig, ax
+            figsize = (base_w, base_h)
+
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        return fig, ax
 
     def _rotate_xticks(self, ax: Axes) -> None:
         """Apply rotation as requested by the user.
@@ -1375,12 +1383,11 @@ class ChartMonkey:
             return labels
         return ['\n'.join(wrap(lbl, max_chars)) for lbl in labels]
 
-    def _legend_ncol(self, fig: Figure, ax: Axes, legend_pos: str = "right", max_ratio: float = 0.9) -> int:
+    def _legend_ncol(self, fig: Figure, handles: Sequence[Any], labels: Sequence[str], legend_pos: str = "right", max_ratio: float = 0.9) -> int:
         """Determine optimal number of legend columns to ensure legend stays within the 
         height (right legend) / width (bottom legend) of the data axes and uses
         extra cols (right legend) / rows (bottom legend) in order to do so."""
 
-        handles, labels = ax.get_legend_handles_labels()
         if not labels:
             return 1
         
@@ -1491,7 +1498,7 @@ class ChartMonkey:
             cfg.legend_label = cfg.group_by
         
         # Create a temporary legend and title to measure required space
-        ncol = self._legend_ncol(fig, axes[0], legend_pos=legend_pos)
+        ncol = self._legend_ncol(fig, handles, labels, legend_pos=legend_pos)
         temp_legend = fig.legend(handles, labels, ncol=ncol, loc="upper right", title=cfg.legend_label or None)
         if cfg.title:
             temp_title = fig.text(0, 1, title_wrap, fontsize=title_fontsize)
@@ -1541,14 +1548,6 @@ class ChartMonkey:
         if cfg.subtitle:
             axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
 
-        # For pies, equal aspect means square axes so push square against right edge so slack is on the left
-        is_pie = any(isinstance(p, mpatches.Wedge) for a in axes for p in a.patches)
-        if legend_pos == "right" and is_pie:
-            for a in axes:
-                # only anchor axes that actually contain wedges
-                if any(isinstance(p, mpatches.Wedge) for p in a.patches):
-                    a.set_anchor('E')  # stick the square to the right side of its slot
-
         fig.tight_layout(rect=rect)
 
         # Center suptitle over the union of axes
@@ -1560,7 +1559,7 @@ class ChartMonkey:
 
         # Add final legend in the reserved area
         if legend_pos != "none" and labels:
-            ncol = self._legend_ncol(fig, axes[0], legend_pos)
+            ncol = self._legend_ncol(fig, handles, labels, legend_pos)
             if legend_pos == "right":
                 loc, bbox = "center right", (1.0, 0.5)
             else:  # bottom
@@ -1770,7 +1769,7 @@ class ChartMonkey:
         - Honors cfg.show_labels / cfg.show_percent.
         """
         cfg = self._chart_params
-        fig, ax = self._ensure_fig_ax(ax)
+        fig, ax = self._ensure_fig_ax(ax, prefer_square=True)
 
         # Determine names column
         names_col = cfg.names or (cfg.x if (cfg.x and cfg.x in df.columns) else None)
@@ -1927,6 +1926,8 @@ class ChartMonkey:
         Axis-level config comes from each chart's own call.
         """
 
+        charts = [chart1, chart2] + ([chart3] if chart3 else [])
+
         # ensure individual charts are passed using cm.chart.x syntax and not cm.x syntax
         def _check_spec(obj, name):
             if not isinstance(obj, ChartSpec):
@@ -1934,26 +1935,28 @@ class ChartMonkey:
                     f"compare(...): `{name}` must be built with cm.chart.<kind>(...). "
                     f"You passed {type(obj).__name__}. Use cm.chart.bar(...) not cm.bar(...)."
                 )
-        _check_spec(chart1, "chart1")
-        _check_spec(chart2, "chart2")
-        if chart3 is not None:
-            _check_spec(chart3, "chart3")
+        
+        for i, c in enumerate(charts, 1):
+            _check_spec(c, f"chart{i}")
 
         # Compare() function config drives figure/title/legend/save/show
         fig_cfg = self._set_params(**kwargs)
 
         # Build a figure to place the individual charts into
-        n = 3 if chart3 else 2
+        n = len(charts)
         base_w, base_h = fig_cfg.fig_size
-        fig, axes = plt.subplots(1, n, figsize=(base_w * n, base_h), sharey=sharey)
-
+        min_wh = min(base_w, base_h)
+        sizes = [(min_wh, min_wh) if c.kind == 'pie' else (base_w, base_h) for c in charts]
+        fig_w = sum(w for w, _ in sizes) # side by side charts have additive widths 
+        fig_h = max(h for _, h in sizes) # but not additive heights
+        width_ratios = [w for w, _ in sizes]
+        fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), sharey=sharey, gridspec_kw={"width_ratios": width_ratios})
+         
         # Draw child charts
-        _, _, chart_data1 = chart1.render(axes[0], **kwargs)
-        _, _, chart_data2 = chart2.render(axes[1], **kwargs)
-        chart_data = [chart_data1, chart_data2]
-        if chart3:
-            _, _, chart_data3 = chart3.render(axes[2], **kwargs)
-            chart_data.append(chart_data3)
+        chart_data = []
+        for ax, chart in zip(axes, charts):
+            _, _, data = chart.render(ax, **kwargs)
+            chart_data.append(data)
 
         # Figure styling
         self._chart_params = fig_cfg

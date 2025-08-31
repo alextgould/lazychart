@@ -3,37 +3,21 @@
 ## High priority
 
 * violin chart
-* 
 
 ## Medium priority
 
 * look at the different standard plot "kind" options and add them to this list
  - 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
 * "delay" chart. This takes a date or column of dates and then differences with another column of dates to get delays. Then a line chart is used to plot the "distribution" of whatever we're looking at in time delay relative to the (fixed or per row) starting date.
-* "mix" comparison chart. This has some sort of ratio on the left side (e.g. mean levels by category) and has the frequency chart on the right side (i.e. remove the y column from the spec so you get row counts instead).
 * update README, including markdown formatted tables of functions/arguments
-* update docstrings for bar() pie() etc, particularly with specific methods that may also be included in common docstring at present (split them)
+* trend lines on line/scatter charts (linear? extrapolate?)
 
 ## Low priority
 
 * when taking the defensive copy of df, only copy the relevant columns, so if someone passes a huge df we don't copy the whole thing but just take the 3 relevant columns into our copy
+* review original "impossible" prompt to see what features we haven't implemented yet
 * consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
 * split code into separate modules (as late as possible pre v1.0.0)
-
-
-
-Prompt (slow):
-
-A few followup questions:
-
-1. With the fix to pie charts in (1), should I remove the style_axes=False style code throughout? This was only added to avoid pie charts calling _style_axes but I believe with the wedges being collected we may no longer need this and want to call _style_axes in pie()? Or am I a bit confused.
-
-2. With the delay() function in (5), it seems it may assume a pd.Timestamp. I think it would be more canonical to accept a str and coerce this. I think I have a function in my code that already does this? Suggest how I can most efficiently accept e.g. '1jan15' as the input and any associated changes (e.g. docstring). I note I still want to be able to specify a column in df, so the order should be col in df > coerce to datetime > throw error. Also I notice we have s = pd.to_datetime(start) in the code, so perhaps it's already set up in a reasonable way, just check and let me know.
-
-3. I started converting mode to cumulative: Optional[bool] = False, but it occurs to me that with normalize : bool, default True, perhaps I should in fact have mode but have the three modes be 'incremental' 'cumulative' and 'proportion' or similar. Ideally my API will be similar to the stacking bar chart api perhaps? Recommend an approach here.
-
-4. I note we've added some cool functionality to use hours and bins (e.g. 3 hourly bins). I suspect what may be more useful for me (in addition, not instead) is the ability to e.g. use a cumulative count by month or quarter, so "zoom out" rather than "zoom in". If there's any way we can align this with the levels available in the other functions (e.g. year, quarter, month, week, day), that might be a nice touch.
-
 
 Prompt (slow):
 
@@ -362,12 +346,6 @@ Then just tag v0.1.0; your wheels/install will carry that version (and dev build
 * no legend if only one category
 * provide dict to quickly remap labels e.g. 0/1 becomes "No"/"Yes"
 * sort by value doesn't work when no y axis variable, should sort by count in this case
-* consider removing ValueError(f"Column '{x}' contains values that cannot be parsed as datetimes.") and just letting values flow through as missings and/or removing missing values at this point, perhaps with a logger warning
-* increase default title font size
-* add a little bit of padding between x axis label and tick mark labels
-* show days with zero data in a x_period chart (e.g. days)
-* better way to show weeks in a x_period chart
-* legend title based on group_by variable by default (only on right legend?)
 
 #### To be added
 
@@ -382,225 +360,6 @@ I want to add in a compare chart which can compare two charts side-by-side (and 
 
 
 ### Old code to potentially revisit with ChatGPT in the near future
-
-```python
-
-# -----------------------------------------------------------------------------
-# Future development                                                           
-# -----------------------------------------------------------------------------
-
-    # ---- Side-by-side combo (restored semantics) -------------------------------
-    @add_docstring(COMMON_DOCSTRING)
-    def compare(
-        self,
-        chart1: Callable[[Axes], None],
-        chart2: Callable[[Axes], None],
-        chart3: Optional[Callable[[Axes], None]], # only if it doesn't complicate things too much
-        **kwargs: Any,
-    ) -> tuple[Figure, Dict[str, Axes]]:
-        """Create a side-by-side figure using individual lazychart charts (2 or 3)
-        as data axes, but with a shared legend and title (taken from first chart?)"""
-
-        # TODO - this function needs to be developed
-
-        # see existing setup below:
-        if False:
-            # bar() for reference
-            def bar(self, **kwargs: Any) -> Optional[tuple[Figure, Axes, pd.DataFrame]]:
-                """Bar chart (counts by default, aggregate `y` when provided)."""
-
-                self._set_params(**kwargs)
-                chart_data = self._aggregate_data()
-                chart_data = self._sort(chart_data)
-                fig, ax, chart_data = self._bar(chart_data)
-                self._apply_common_style(fig, ax, chart_data)
-                self._finalise_layout(fig, ax)
-                return self._save_and_return(fig, ax, chart_data)
-
-            # _bar() for reference
-            def _bar(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
-                cfg = self._chart_params
-                fig, ax = self._ensure_fig_ax(ax)
-                chart_data = self._pivot_data(df)
-                labels_for_color = list(chart_data.columns) if cfg.group_by else [cfg.y or "value"]
-                chart_data.plot(kind="bar",
-                                stacked=(cfg.stacking != "none"),
-                                color=self._get_palette(labels_for_color),
-                                ax=ax,
-                                legend=False)
-                return fig, ax, chart_data
-        # - suggest we do the planned "Refactor to a common chart wrapper" goal alongside compare() dev
-        #   as we ideally want bar() to call _ensure_fig_ax and then pass the ax to _bar() to do the plot
-        #   then similarly we have compare() calls _ensure_fig_ax 2-3 times and can make multiple calls to 
-        #   _bar()/_line() etc to do plots on individual axes
-        # - suspect _bar() will call _apply_common_style (maybe rename this to _style_axes)
-        #   and bar()/compare() will call _finalise_layout (maybe rename this to _style_fig)
-        # - need to check that the _style_axes and _style_fig functions are working on axes and figs only respectively
-        #   may need to move things around to achieve this, or get into the details and confirm it's possible to do this way
-        # - need to consider how we coerce parameters from 2-3 charts and/or compare() kwargs outside the charts
-        #   we could e.g. only use params from the compare() level kwargs and ignore the underlying ones,
-        #   take only the params from the first chart, attempt to combine the params, take only the last chart etc
-        #   perhaps figure level > chart 1 > other charts blending hierarchy
-
-        # some existing code from prior attempts which may be useful, but we may also want to do things differently:        
-
-        # Create 1x2 (or 1x3) figure
-        if chart3:
-            fig, axs = plt.subplots(1, 3, figsize=(cfg.fig_size[0]*3, cfg.fig_size[1])) # not sure if cfg.fig_size exists
-            axes = {"D1": axs[0], "D2": axs[1], "D3": axs[2]}
-        else:
-            fig, axs = plt.subplots(1, 2, figsize=(cfg.fig_size[0]*2, cfg.fig_size[1]))
-            axes = {"D1": axs[0], "D2": axs[1]}
-        
-        # Draw charts
-        chart1(axes["D1"])
-        chart2(axes["D2"])
-        if chart3:
-            chart3(axes["D3"])
-
-        # Collect legend entries across axes
-        handles, labels = [], []
-        for a in axes.values():
-            h, l = a.get_legend_handles_labels()
-            handles += h
-            labels += l
-
-        return fig, axes, chart_data # need to consider if chart_data here is a dict or list of chart data from the underlying chart primitives
-
-    # ---- Delay chart ----------------------------------------------------------
-    @add_docstring(COMMON_DOCSTRING)
-    def delay_chart(
-        self,
-        data: pd.DataFrame,
-        start: Union[str, pd.Timestamp],
-        date: str,
-        group_by: Optional[str] = None,
-        cumulative: bool = False,
-        **kwargs: Any,
-    ) -> tuple[Figure, Axes]:
-        """Plot distribution of delays (days from `start` to `date`)."""
-        cfg = self._set_params(data=data, **kwargs)
-        
-        # Resolve start series (constant or column)
-        if isinstance(start, str) and start in df.columns:
-            start_series = pd.to_datetime(df[start], errors="coerce")
-        else:
-            start_series = pd.to_datetime(pd.Series([start] * len(df)), errors="coerce")
-
-        date_series = pd.to_datetime(df[date], errors="coerce")
-        mask = start_series.notna() & date_series.notna()
-        delays = (date_series[mask] - start_series[mask]).dt.days
-
-        plot_df = pd.DataFrame({"delay": delays})
-        if group_by and group_by in df.columns:
-            plot_df[group_by] = df.loc[mask, group_by].values
-
-        # Build counts per delay (and group)
-        if group_by and group_by in plot_df.columns:
-            counts = plot_df.groupby([group_by, "delay"]).size().reset_index(name="value")
-        else:
-            counts = plot_df.groupby(["delay"]).size().reset_index(name="value")
-
-        # Cumulative if requested
-        if cumulative:
-            if group_by and group_by in plot_df.columns:
-                counts["value"] = counts.groupby(group_by)["value"].cumsum()
-            else:
-                counts["value"] = counts["value"].cumsum()
-
-        # Draw
-        fig, ax = plt.subplots(figsize=cfg.fig_size)
-        if group_by and group_by in counts.columns:
-            for key, sub in counts.groupby(group_by, dropna=False):
-                sub = sub.sort_values("delay")
-                ax.plot(sub["delay"], sub["value"], marker="o", label=str(key))
-        else:
-            counts = counts.sort_values("delay")
-            ax.plot(counts["delay"], counts["value"], marker="o")
-
-        self._apply_common_style(ax)
-        # Some sensible axis labels
-        ax.set_xlabel("Delay (days)")
-        ax.set_ylabel("Count" if not cumulative else "Cumulative count")
-        self._finalise_layout(fig, ax)
-
-        if cfg.save_path:
-            fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
-        if cfg.show_fig:
-            plt.show()
-
-        return fig, ax
-
-    # ---- Combo mix: values vs counts side-by-side (restored) -------------------
-    @add_docstring(COMMON_DOCSTRING)
-    def combo_mix(
-        self,
-        *,
-        data: pd.DataFrame,
-        x: str,
-        y: Optional[str] = None,
-        group_by: Optional[str] = None,
-        aggfunc: Union[str, Callable] = "sum",
-        left_title: Optional[str] = None,
-        right_title: Optional[str] = None,
-        legend: Optional[str] = "right",
-        **kwargs: Any,
-    ) -> tuple[Figure, Dict[str, Axes]]:
-        """Left: aggregated `y` (or counts if None); Right: counts (sample size)."""
-        # Left chart (values)
-        cfg_left = self._set_params(data=data, x=x, y=y, group_by=group_by, aggfunc=aggfunc, **kwargs)
-        agg_left = self._sort(self._aggregate_data())
-
-        # Create multi-axes fig
-        fig, axs = plt.subplots(1, 2, figsize=(cfg_left.fig_size[0]*2, cfg_left.fig_size[1]))
-        axes = {"D1": axs[0], "D2": axs[1]}
-
-        if cfg_left.palette is not None:
-            colors = _resolve_palette(cfg_left.palette)
-            for a in axes.values():
-                a.set_prop_cycle(color=list(colors))
-
-        # Draw left
-        self._bar(agg_left, ax=axes["D1"])
-        if left_title:
-            axes["D1"].set_title(left_title)
-
-        # Right chart (counts)
-        cfg_right = self._set_params(data=data, x=x, y=None, group_by=group_by, aggfunc=aggfunc, **kwargs)
-        agg_right = self._sort(self._aggregate_data())
-        self._bar(agg_right, ax=axes["D2"])
-        if right_title:
-            axes["D2"].set_title(right_title)
-
-        # Style
-        for a in axes.values():
-            self._apply_common_style(a)
-
-        # finalise with shared legend / title
-        # Carry over legend + optional global title
-        self._set_params(legend=legend, title=kwargs.get("title", None), **kwargs)
-        handles, labels = [], []
-        for a in axes.values():
-            h, l = a.get_legend_handles_labels()
-            handles += h
-            labels += l
-        self._finalise_layout_multi(fig, axes, handles, labels)
-
-        cfg = self._chart_params
-        if cfg.save_path:
-            fig.savefig(cfg.save_path, bbox_inches="tight", dpi=fig.dpi)
-        if cfg.show_fig:
-            plt.show()
-
-        # TODO: adjust to have grouped data as an (optional) return value i.e. return fig, ax, data
-        # ideally have show_fig happen with this so e.g. you call fig, ax, df = cm.bar(...) and it displays the chart
-        # and then you can use display(df) or similar to see the values used in the chart
-
-        return fig, axes
-
-
-
-
 
 ## trash
 
