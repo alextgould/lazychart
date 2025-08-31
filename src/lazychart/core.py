@@ -8,6 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 from matplotlib import rcParams
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -1321,8 +1322,6 @@ class ChartMonkey:
                 loc = mdates.AutoDateLocator()
                 ax.xaxis.set_major_locator(loc)
                 ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
-
-        #ax.margins(x=0.02)
         
         # Tick rotation
         self._rotate_xticks(ax)
@@ -1467,7 +1466,7 @@ class ChartMonkey:
         if not labels or len(set(labels)) <= 1:
             legend_pos = "none"
 
-        # Wrap title/subtitle                                                              OK
+        # Wrap title/subtitle
         if cfg.title:
             title_wrap = self._title_wrap(fig, cfg.title, title_fontsize)
         if cfg.subtitle:
@@ -1541,6 +1540,15 @@ class ChartMonkey:
         # Put subtitle on the first axes
         if cfg.subtitle:
             axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
+
+        # For pies, equal aspect means square axes so push square against right edge so slack is on the left
+        is_pie = any(isinstance(p, mpatches.Wedge) for a in axes for p in a.patches)
+        if legend_pos == "right" and is_pie:
+            for a in axes:
+                # only anchor axes that actually contain wedges
+                if any(isinstance(p, mpatches.Wedge) for p in a.patches):
+                    a.set_anchor('E')  # stick the square to the right side of its slot
+
         fig.tight_layout(rect=rect)
 
         # Center suptitle over the union of axes
@@ -1720,9 +1728,6 @@ class ChartMonkey:
             # For parent flow (e.g., compare), just return the pieces without saving/showing.
             return fig, ax, chart_data
 
-    # TODO: work through the list of options in .plot and wrap them into this framework
-    # 'line', 'bar', 'barh', 'hist', 'box', 'kde', 'density', 'area', 'pie', 'scatter', 'hexbin'
-
     def _bar(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
         cfg = self._chart_params
         fig, ax = self._ensure_fig_ax(ax)
@@ -1801,15 +1806,24 @@ class ChartMonkey:
             counterclock=False,
         )
 
-        # Use legend instead of wedge labels if requested
-        if not cfg.show_labels:
-            ax.legend(
-                wedges,
-                chart_data.index.astype(str).tolist(),
-                title=cfg.legend_label or None
-            )
+        # set legend labels on the wedge artists, *do not* create an axes legend here.
+        # This allows _style_fig to collect handles/labels and place a single, figure-level legend
+        # at the requested location without triggering aspect/limits gymnastics.
+        for w, lab in zip(wedges, chart_data.index.astype(str).tolist()):
+            w.set_label(lab)
 
-        ax.axis("equal")
+        # Keep the pie circular and centered without messing with x/y limits
+        ax.set_aspect('equal', adjustable='box')
+
+        # # Use legend instead of wedge labels if requested
+        # if not cfg.show_labels:
+        #     ax.legend(
+        #         wedges,
+        #         chart_data.index.astype(str).tolist(),
+        #         title=cfg.legend_label or None
+        #     )
+        # ax.axis("equal")
+
         return fig, ax, chart_data
 
 # -----------------------------------------------------------------------------
@@ -1818,19 +1832,65 @@ class ChartMonkey:
 
     @add_docstring(COMMON_DOCSTRING)
     def bar(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
-        """Bar chart (counts by default, aggregate `y` when provided)."""
+        """Bar chart.
+
+        By default shows **counts** per category (``x``). If you provide ``y``, the
+        values are aggregated per category with ``aggfunc`` (default ``'sum'``).
+
+        Supports grouped bars via ``group_by`` and stacking via ``stacking``
+        (``'stacked'`` | ``'proportion'`` | ``'none'``).
+
+        Examples
+        --------
+        >>> cm.bar(data=df, x='department')
+        >>> cm.bar(data=df, x='month', y='revenue', aggfunc='mean', group_by='region', stacking='none')
+        """
         return self._chart_pipeline(self._bar, ax=ax, finalize=finalize, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
     def line(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
-        """Line chart. Requires `x`."""
+        """Line chart.
+
+        Requires ``x``. If ``y`` is omitted, draws counts per ``x``. With
+        ``group_by``, draws one line per group. If ``x`` is datetime-like, you can
+        bin with ``x_period`` (e.g., ``'month'``/``'quarter'``) and optionally fill
+        gaps (``show_gaps=True``, default when ``x_period`` is set).
+
+        Examples
+        --------
+        >>> cm.line(data=df, x='date', y='sales', group_by='region', x_period='month')
+        >>> cm.line(data=df, x='delay_days') # counts per delay day
+        """
         return self._chart_pipeline(self._line, ax=ax, finalize=finalize, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
     def pie(self, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
-        """Pie chart. Requires `names`+`values` (or `x` as names + counts).
-        
-        Honors cfg.show_labels / cfg.show_percent.
+        """Pie chart.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+        Source data.
+        names : str, optional
+        Category column for slices. If omitted, you may pass ``x`` (alias).
+        values : str, optional
+        Numeric column with slice sizes. If omitted and only ``names``/``x``
+        are supplied, counts are used upstream.
+        show_labels : bool, default False
+        If ``True``, draw labels directly on wedges.
+        show_percent : bool | str, default True
+        If ``True``, add percentage text to wedges (``"%1.0f%%"``). If a format
+        string is provided, it is passed to Matplotlib's ``autopct``.
+
+        Notes
+        -----
+        Legends are composed at the **figure level** (right/bottom) so the pie itself
+        stays large and centered. Use ``legend='right'`` (default), ``'bottom'``, or ``'none'``.
+
+        Examples
+        --------
+        >>> cm.pie(data=df, names='species', values='count', legend='right', title='Share by species')
+        >>> cm.pie(data=df, x='species') # counts rows per category
         """
 
         # aliasing just for pies
@@ -1899,3 +1959,315 @@ class ChartMonkey:
         self._chart_params = fig_cfg
         self._style_fig(fig, axes)
         return self._save_and_return(fig, axes, chart_data)
+    
+    def mix(self,
+            chart1: 'ChartSpec',
+            *,
+            mix_kind: str = 'bar',
+            mix_by: Optional[str] = None,
+            allow_x_fallback: bool = True,
+            mix_max_categories: int = 30,
+            mix_max_ratio: float = 0.2,
+            sharey: bool = False,
+            mix_subtitle: Optional[str] = 'Mix',
+            **kwargs: Any):
+        """
+        Compare a primary chart with a simple **class mix** panel.
+
+        Dimension selection (in order):
+        1) `mix_by` if provided,
+        2) `group_by` from the primary chart; if absent, sticky `group_by` from cfg,
+        3) fallback to `x` **iff** it's plausibly categorical (object/category/string/bool,
+            or low cardinality by absolute/relative thresholds).
+
+        Parameters
+        ----------
+        chart1 : ChartSpec
+            Chart spec created with `cm.chart.<kind>(...)`.
+        mix_kind : {'bar','pie','line'}, default 'bar'
+            Chart type for the mix panel.
+        mix_by : str, optional
+            Column to show the mix over (overrides heuristics).
+        allow_x_fallback : bool, default True
+            Allow falling back to `x` when no `group_by` is found and `x` is categorical.
+        mix_max_categories : int, default 30
+            Absolute unique-count threshold for categorical fallback.
+        mix_max_ratio : float, default 0.2
+            Relative uniqueness threshold (nunique / rows) for numeric fallback.
+        sharey : bool, default False
+            Share y-axis when sensible.
+        mix_subtitle : str | None, default 'Mix'
+            Subtitle for the mix panel.
+
+        Examples
+        --------
+        >>> cm.mix(cm.chart.bar(data=df, x='species', y='weight', aggfunc='mean'))
+        >>> cm.mix(cm.chart.line(data=df, x='feature'), mix_kind='bar')
+        """
+        if not isinstance(chart1, ChartSpec):
+            raise TypeError("mix(...): pass a chart created with cm.chart.<kind>(...).")
+
+        # 0) Pull sticky params & figure-level kwargs (like compare() does)
+        fig_cfg = self._set_params(**kwargs)
+
+        # 1) Read first-chart kwargs
+        ckwargs = dict(chart1.kwargs)
+        grp_chart = ckwargs.get('group_by', None)
+        x_chart   = ckwargs.get('x', None)
+
+        # 2) Resolve the dataframe once (respects sticky cfg.data, filters, etc.)
+        #    _prepare_dataframe uses the cfg set by _set_params above.
+        df = self._prepare_dataframe()
+
+        # 3) Choose mix dimension
+        mix_var = mix_by  # explicit wins
+        if mix_var is None:
+            mix_var = grp_chart or fig_cfg.group_by  # prefer group_by (chart → sticky)
+
+        # helper: decide if a df column is plausibly categorical
+        def _is_plausibly_categorical(df: pd.DataFrame, col: str) -> bool:
+            if col not in df.columns:
+                return False
+            s = df[col]
+            import pandas.api.types as ptypes
+            n = len(s)
+            nunique = s.nunique(dropna=True)
+
+            # obvious categorical types
+            if ptypes.is_categorical_dtype(s) or ptypes.is_bool_dtype(s) or ptypes.is_string_dtype(s) or s.dtype == object:
+                return True
+
+            # datetime: treat as categorical only if low-card
+            if ptypes.is_datetime64_any_dtype(s):
+                return nunique <= mix_max_categories
+
+            # numeric: accept small discrete domains
+            if ptypes.is_integer_dtype(s) or ptypes.is_numeric_dtype(s):
+                return (nunique <= mix_max_categories) or ((nunique / max(n, 1)) <= mix_max_ratio)
+
+            # default: conservative
+            return nunique <= mix_max_categories
+
+        if mix_var is None and allow_x_fallback and isinstance(x_chart, str) and _is_plausibly_categorical(df, x_chart):
+            mix_var = x_chart
+
+        if not mix_var:
+            raise ValueError(
+                "mix(...): could not infer a categorical field for the mix panel. "
+                "Prefer charts with `group_by`, pass mix_by='column', or ensure x is categorical."
+            )
+
+        if mix_kind not in {'bar', 'pie', 'line'}:
+            raise ValueError("mix_kind must be one of: 'bar', 'pie', or 'line'.")
+
+        # 4) Build the second spec: simple counts by mix_var (no y)
+        second_kwargs: Dict[str, Any] = {'x': mix_var}
+        if mix_subtitle is not None:
+            second_kwargs['subtitle'] = mix_subtitle
+
+        chart2 = ChartSpec(self, mix_kind, second_kwargs)
+
+        # 5) Compare (figure-level kwargs already merged via _set_params; still pass through)
+        return self.compare(chart1, chart2, sharey=sharey, **kwargs)
+
+
+    def delay(self, *,
+        start: Union[str, pd.Timestamp],
+        end: str,
+        unit: Literal['D','h','m'] = 'D',
+        mode: Literal['incremental','cumulative','proportion'] = 'cumulative',
+        normalize: bool = True,
+        bin_size: int = 1,
+        calendar_unit: Optional[Literal['day','week','month','quarter','year']] = None,
+        ax: Optional[Axes] = None,
+        finalize: bool = True,
+        **kwargs: Any):
+        """
+        Delay distribution chart.
+
+        Compute delays between a **start** time (either a column name or a fixed
+        timestamp) and an **end** time column, then plot the **incremental** or
+        **cumulative** distribution as a line chart. If you pass a numeric **y**
+        (via kwargs), the chart aggregates **sums of y**; otherwise it defaults to
+        **counts**.
+
+        Parameters
+        ----------
+        start : str | pd.Timestamp
+            Starting date/time. If a string and matches a column in ``data``,
+            that column is used per row. Otherwise it is parsed with pandas.to_datetime.
+            You must use unambiguous formats (e.g. "YYYY-MM-DD", "1jan15").  
+        end : str
+            Column with the ending date/time per row.
+        unit : {'D','h','m'}, default 'D'
+            Units for numeric delay bucketing (days, hours, minutes). Ignored if
+            ``calendar_unit`` is set.
+        mode : {'incremental','cumulative','proportion'}, default 'cumulative'
+            - ``'incremental'`` → per-bin counts/sums (PDF).
+            - ``'cumulative'`` → cumulative counts/sums over delay (CDF).
+            - ``'proportion'`` → alias for ``incremental`` with ``normalize=True``.
+        normalize : bool, default True
+            If ``True``: scale to proportions.
+            - Incremental: divide each bin by the group/overall total.
+            - Cumulative: divide by the final cumulative (group/overall).
+        bin_size : int, default 1
+            Bin width in ``unit`` (e.g. ``2`` with ``unit='D'`` → 2-day bins).
+            Ignored if ``calendar_unit`` is set.
+        calendar_unit : {'day','week','month','quarter','year'}, optional
+            If provided, compute **calendar-aware** integer differences
+            (e.g. months-to-resolution) using pandas Periods and ignore
+            ``unit``/``bin_size``.
+
+        Other keyword arguments
+        -----------------------
+        Pass standard chart kwargs like ``title``, ``subtitle``, ``legend``,
+        ``group_by``, ``y``, etc. If you supply ``group_by``, the incremental /
+        cumulative is computed **per group** and lines are drawn per group. (``y``
+        must be a **single** numeric column.)
+
+        Examples
+        --------
+        >>> # CDF of days-to-resolve (counts)
+        >>> cm.delay(data=df, start='created_at', end='resolved_at', unit='D')
+
+        >>> # 3-hour incremental proportions (PDF)
+        >>> cm.delay(data=df, start='t0', end='t1', unit='h', bin_size=3, mode='proportion')
+
+        >>> # Sum of payment amounts by delay (cumulative), per region
+        >>> cm.delay(data=df, start='order_time', end='paid_time', y='payment', group_by='region')
+
+        >>> # Calendar-aware months-to-resolution CDF
+        >>> cm.delay(data=df, start='created_at', end='resolved_at', calendar_unit='month')
+        """
+        # Pull chart config (y/group_by/title/etc.)
+        cfg = self._set_params(**kwargs)
+        df0 = self._prepare_dataframe()  # defensive copy
+
+        # Resolve start/end series
+        if isinstance(start, str) and start in df0.columns:
+            s = pd.to_datetime(df0[start], errors='coerce')
+        else:
+            try:
+                s_fixed = pd.to_datetime(start)
+            except Exception as e:
+                raise ValueError(f"Could not parse start={start!r} as a date; "
+                                "pass a column name or a parsable date string.") from e
+            s = pd.Series(s_fixed, index=df0.index)
+
+        e = pd.to_datetime(df0[end], errors='coerce')
+
+        # Compute delay
+        if calendar_unit:
+            # calendar-aware integer difference via pandas Periods (D, W-*, M, Q, Y)
+            freq = self._chart_params._normalize_x_period(calendar_unit)  # canonical code
+            s_per = s.dt.to_period(freq)
+            e_per = e.dt.to_period(freq)
+            df1 = df0.copy()
+            df1['delay'] = (e_per - s_per).astype('int64')
+        else:
+            vals = (e - s)
+            if unit == 'D':
+                vals = vals / np.timedelta64(1, 'D')
+            elif unit == 'h':
+                vals = vals / np.timedelta64(1, 'h')
+            elif unit == 'm':
+                vals = vals / np.timedelta64(1, 'm')
+            else:
+                raise ValueError("unit must be one of 'D','h','m'")
+            df1 = df0.copy()
+            df1['delay'] = np.floor(pd.to_numeric(vals, errors='coerce') / max(bin_size, 1)) * max(bin_size, 1)
+
+        # Drop NaNs in delay
+        df1 = df1.dropna(subset=['delay'])
+
+        # Determine grouping and y (sum column) behavior
+        grp = cfg.group_by  # may be None
+        y_col: Optional[str] = None
+        if cfg.y is not None:
+            if isinstance(cfg.y, str):
+                y_col = cfg.y
+                if y_col not in df1.columns:
+                    raise ValueError(f"y={y_col!r} not found in data.")
+            else:
+                raise ValueError("delay(...): y must be a single column (str), not a sequence.")
+
+        # Alias
+        if mode == 'proportion':
+            mode, normalize = 'incremental', True
+
+        # --- Incremental (per-bin) ---
+        if mode == 'incremental':
+            if grp:
+                if y_col:
+                    data_inc = (df1.groupby([grp, 'delay'], observed=True)[y_col]
+                                    .sum().reset_index(name='value'))
+                    if normalize:
+                        totals = data_inc.groupby(grp)['value'].transform('sum')
+                        data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
+                else:
+                    data_inc = (df1.groupby([grp, 'delay'], observed=True)
+                                    .size().reset_index(name='value'))
+                    if normalize:
+                        totals = data_inc.groupby(grp)['value'].transform('sum')
+                        data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
+
+                data_inc = data_inc.sort_values(['delay', grp])
+                return self.line(data=data_inc, x='delay', y='value', group_by=grp,
+                                aggfunc='sum', ax=ax, finalize=finalize,
+                                **{k: v for k, v in kwargs.items()
+                                    if k not in {'data','x','y','group_by','aggfunc'}})
+            else:
+                if y_col:
+                    data_inc = (df1.groupby('delay')[y_col].sum()
+                                    .sort_index().rename('value').reset_index())
+                    if normalize:
+                        total = data_inc['value'].sum()
+                        data_inc['value'] = data_inc['value'] / total if total else 0.0
+                else:
+                    data_inc = (df1.groupby('delay').size()
+                                    .sort_index().rename('value').reset_index())
+                    if normalize:
+                        total = data_inc['value'].sum()
+                        data_inc['value'] = data_inc['value'] / total if total else 0.0
+
+                return self.line(data=data_inc, x='delay', y='value',
+                                aggfunc='sum', ax=ax, finalize=finalize,
+                                **{k: v for k, v in kwargs.items()
+                                    if k not in {'data','x','y','aggfunc'}})
+
+        # --- Cumulative (CDF over delay) ---
+        if mode == 'cumulative':
+            if grp:
+                if y_col:
+                    base = (df1.groupby([grp, 'delay'], observed=True)[y_col]
+                                .sum().reset_index(name='value'))
+                else:
+                    base = (df1.groupby([grp, 'delay'], observed=True)
+                                .size().reset_index(name='value'))
+                base = base.sort_values(['delay', grp])
+                base['value'] = base.groupby(grp)['value'].cumsum()
+
+                if normalize and not base.empty:
+                    finals = base.groupby(grp)['value'].transform('max')
+                    base['value'] = np.where(finals.gt(0), base['value'] / finals, 0.0)
+
+                return self.line(data=base, x='delay', y='value', group_by=grp,
+                                aggfunc='sum', ax=ax, finalize=finalize,
+                                **{k: v for k, v in kwargs.items()
+                                    if k not in {'data','x','y','group_by','aggfunc'}})
+            else:
+                if y_col:
+                    srs = (df1.groupby('delay')[y_col].sum().sort_index().cumsum())
+                else:
+                    srs = (df1.groupby('delay').size().sort_index().cumsum())
+
+                if normalize and not srs.empty:
+                    srs = srs / float(srs.iloc[-1])
+
+                g = srs.rename('value').reset_index()
+                return self.line(data=g, x='delay', y='value',
+                                aggfunc='sum', ax=ax, finalize=finalize,
+                                **{k: v for k, v in kwargs.items()
+                                    if k not in {'data','x','y','aggfunc'}})
+
+        raise ValueError("mode must be 'incremental', 'cumulative', or 'proportion'")

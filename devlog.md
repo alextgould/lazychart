@@ -2,28 +2,50 @@
 
 ## High priority
 
-* test/debug compare charts, pie charts
+* violin chart
+* 
 
 ## Medium priority
 
-* look through code for "TODO" comments that I've left lying around and put them in this list
 * look at the different standard plot "kind" options and add them to this list
+ - 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
 * "delay" chart. This takes a date or column of dates and then differences with another column of dates to get delays. Then a line chart is used to plot the "distribution" of whatever we're looking at in time delay relative to the (fixed or per row) starting date.
 * "mix" comparison chart. This has some sort of ratio on the left side (e.g. mean levels by category) and has the frequency chart on the right side (i.e. remove the y column from the spec so you get row counts instead).
-* test/build help() style functions to print out docstrings
 * update README, including markdown formatted tables of functions/arguments
 * update docstrings for bar() pie() etc, particularly with specific methods that may also be included in common docstring at present (split them)
 
 ## Low priority
 
+* when taking the defensive copy of df, only copy the relevant columns, so if someone passes a huge df we don't copy the whole thing but just take the 3 relevant columns into our copy
 * consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
 * split code into separate modules (as late as possible pre v1.0.0)
 
 
 
+Prompt (slow):
+
+A few followup questions:
+
+1. With the fix to pie charts in (1), should I remove the style_axes=False style code throughout? This was only added to avoid pie charts calling _style_axes but I believe with the wedges being collected we may no longer need this and want to call _style_axes in pie()? Or am I a bit confused.
+
+2. With the delay() function in (5), it seems it may assume a pd.Timestamp. I think it would be more canonical to accept a str and coerce this. I think I have a function in my code that already does this? Suggest how I can most efficiently accept e.g. '1jan15' as the input and any associated changes (e.g. docstring). I note I still want to be able to specify a column in df, so the order should be col in df > coerce to datetime > throw error. Also I notice we have s = pd.to_datetime(start) in the code, so perhaps it's already set up in a reasonable way, just check and let me know.
+
+3. I started converting mode to cumulative: Optional[bool] = False, but it occurs to me that with normalize : bool, default True, perhaps I should in fact have mode but have the three modes be 'incremental' 'cumulative' and 'proportion' or similar. Ideally my API will be similar to the stacking bar chart api perhaps? Recommend an approach here.
+
+4. I note we've added some cool functionality to use hours and bins (e.g. 3 hourly bins). I suspect what may be more useful for me (in addition, not instead) is the ability to e.g. use a cumulative count by month or quarter, so "zoom out" rather than "zoom in". If there's any way we can align this with the levels available in the other functions (e.g. year, quarter, month, week, day), that might be a nice touch.
 
 
+Prompt (slow):
 
+I'm thinking about what charts I should add into my lazychart framework next. I note with matplotlib they have 'kind' values which include 'line' 'bar' 'pie', but also include the following: 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
+
+1. Give me a priority rank /10 for each of the above charts, listing them in descending order from highest priority to lowest priority and giving a small explanation of why this priority rating was given.
+
+2. What other charts would you consider "high priority". This could include "basic" charts, but my guess it that most of the "basic" charts are covered above. So also consider charts that would be particularly useful to me as a data scientist, such as for EDA, or for building and assessing machine learning models. For instance, correlation matrices, partial dependence plots (PDPs), training curves, violin plots and so forth are all of interest to me. I may need to consider how much I leverage existing frameworks versus creating things myself from scratch. I'm keen to get a wide and varied list of options, and please give each of these a priority rank /10 similar to the previous question, so I can start thinking about what order to implement them in.
+
+3. As a specific example, I want to create PDPs with mix charts, so accepting a sklearn model and having it plot a PDP is less useful than getting the raw chart data and using this to create a plot. I ultimately want the lazychart interface to continue to be super accessible and easy, so for example, it might be good to accept actuals and predicteds, but it might also be good to accept a model object and compatible dataset and have the function create the raw data from these objects. I don't want to overcomplicate my code with all permutations, but also don't want to assume the user will do a bunch of extra work to use what is meant to be a "lazy" package. Give some thoughts on this example as a case study of the more general question of what inputs I should be looking to use with my machine learning related charts.
+
+4. As a final thought exercise, note that the lazychart package is somewhat unique in that it can do not only charting but also data wrangling. For example, we're working on the "delay" chart, where we look at incremental/cumulative distributions bsaed on input dates and/or date columns. I imagine there are similar exercises that we could incorporate, that would allow a data scientist to "cut to the chase" and produce a really useful visualisation without having to transform the data as we can code the data transformation into the charting package. Give me a bunch of examples of this sort of data prep / aggregation -> chart that might be worth considering.
 
 # Prompt history
 
