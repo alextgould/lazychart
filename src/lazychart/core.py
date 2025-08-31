@@ -8,7 +8,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
-import matplotlib.patches as mpatches
 from matplotlib import rcParams
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -2073,114 +2072,91 @@ class ChartMonkey:
         # 5) Compare (figure-level kwargs already merged via _set_params; still pass through)
         return self.compare(chart1, chart2, sharey=sharey, **kwargs)
 
-
     def delay(self, *,
-        start: Union[str, pd.Timestamp],
-        end: str,
-        unit: Literal['D','h','m'] = 'D',
-        mode: Literal['incremental','cumulative','proportion'] = 'cumulative',
-        normalize: bool = True,
+        x: Union[str, pd.Timestamp, None] = None,
+        x2: Union[str, pd.Timestamp, None] = None,
+        x_period: Optional[Literal['month','quarter','year','week','day']] = 'day',
+        cumulative: bool = False,
+        proportion: bool = False,
         bin_size: int = 1,
-        calendar_unit: Optional[Literal['day','week','month','quarter','year']] = None,
         ax: Optional[Axes] = None,
         finalize: bool = True,
         **kwargs: Any):
         """
         Delay distribution chart.
 
-        Compute delays between a **start** time (either a column name or a fixed
-        timestamp) and an **end** time column, then plot the **incremental** or
-        **cumulative** distribution as a line chart. If you pass a numeric **y**
-        (via kwargs), the chart aggregates **sums of y**; otherwise it defaults to
-        **counts**.
+        Compute delays between two date/time values (**x** and **x2**) and plot either
+        the **incremental** (per-bin) or **cumulative** distribution as a line chart.
+
+        - If you pass a numeric **y** in kwargs, the chart aggregates **sums of y**.
+        - If you omit **y**, it defaults to **counts**.
+        - If **group_by** is provided, the above is done per group.
 
         Parameters
         ----------
-        start : str | pd.Timestamp
-            Starting date/time. If a string and matches a column in ``data``,
-            that column is used per row. Otherwise it is parsed with pandas.to_datetime.
-            You must use unambiguous formats (e.g. "YYYY-MM-DD", "1jan15").  
-        end : str
-            Column with the ending date/time per row.
-        unit : {'D','h','m'}, default 'D'
-            Units for numeric delay bucketing (days, hours, minutes). Ignored if
-            ``calendar_unit`` is set.
-        mode : {'incremental','cumulative','proportion'}, default 'cumulative'
-            - ``'incremental'`` → per-bin counts/sums (PDF).
-            - ``'cumulative'`` → cumulative counts/sums over delay (CDF).
-            - ``'proportion'`` → alias for ``incremental`` with ``normalize=True``.
-        normalize : bool, default True
-            If ``True``: scale to proportions.
-            - Incremental: divide each bin by the group/overall total.
-            - Cumulative: divide by the final cumulative (group/overall).
+        x, x2 : str | pd.Timestamp
+            Either column names in ``data`` or fixed date/times (parsed with ``pd.to_datetime``).
+            Order does **not** matter; delays are absolute differences.
+        x_period : {'month','quarter','year','week','day'}, default 'day'
+            Calendar-aware unit used to measure the delay (mapped to pandas freq codes).
+        cumulative : bool, default False
+            If True, plot per-bin values (PDF). If False, plot cumulative values (CDF).
+        proportion : bool, default False
+            If True, scale each series to proportions:
+              - incremental: values per series sum to 1.0
+              - cumulative: the rightmost value reaches 1.0
         bin_size : int, default 1
-            Bin width in ``unit`` (e.g. ``2`` with ``unit='D'`` → 2-day bins).
-            Ignored if ``calendar_unit`` is set.
-        calendar_unit : {'day','week','month','quarter','year'}, optional
-            If provided, compute **calendar-aware** integer differences
-            (e.g. months-to-resolution) using pandas Periods and ignore
-            ``unit``/``bin_size``.
+            Combine consecutive delay bins (e.g., 7-day buckets when x_period='day' and bin_size=7).
 
-        Other keyword arguments
-        -----------------------
-        Pass standard chart kwargs like ``title``, ``subtitle``, ``legend``,
-        ``group_by``, ``y``, etc. If you supply ``group_by``, the incremental /
-        cumulative is computed **per group** and lines are drawn per group. (``y``
-        must be a **single** numeric column.)
-
-        Examples
-        --------
-        >>> # CDF of days-to-resolve (counts)
-        >>> cm.delay(data=df, start='created_at', end='resolved_at', unit='D')
-
-        >>> # 3-hour incremental proportions (PDF)
-        >>> cm.delay(data=df, start='t0', end='t1', unit='h', bin_size=3, mode='proportion')
-
-        >>> # Sum of payment amounts by delay (cumulative), per region
-        >>> cm.delay(data=df, start='order_time', end='paid_time', y='payment', group_by='region')
-
-        >>> # Calendar-aware months-to-resolution CDF
-        >>> cm.delay(data=df, start='created_at', end='resolved_at', calendar_unit='month')
+        Notes
+        -----
+        - ``start`` / ``end`` are **deprecated** aliases for ``x`` / ``x2`` and will be removed.
         """
+
+        if x is None or x2 is None:
+            raise TypeError("delay(): required arguments missing: x and x2")
+
         # Pull chart config (y/group_by/title/etc.)
         cfg = self._set_params(**kwargs)
         df0 = self._prepare_dataframe()  # defensive copy
 
-        # Resolve start/end series
-        if isinstance(start, str) and start in df0.columns:
-            s = pd.to_datetime(df0[start], errors='coerce')
-        else:
+        # Resolve two datetime-like series (column or scalar)
+        def _resolve_datetime(val):
+            if isinstance(val, str) and val in df0.columns:
+                return pd.to_datetime(df0[val], errors='coerce'), True
             try:
-                s_fixed = pd.to_datetime(start)
-            except Exception as e:
-                raise ValueError(f"Could not parse start={start!r} as a date; "
-                                "pass a column name or a parsable date string.") from e
-            s = pd.Series(s_fixed, index=df0.index)
+                ts = pd.to_datetime(val)
+                return pd.Series(ts, index=df0.index), False  # broadcast scalar
+            except Exception as exc:
+                raise ValueError(f"delay(...): could not parse {val!r} as datetime or column.") from exc
 
-        e = pd.to_datetime(df0[end], errors='coerce')
+        s, _ = _resolve_datetime(x)
+        e, _ = _resolve_datetime(x2)
 
-        # Compute delay
-        if calendar_unit:
-            # calendar-aware integer difference via pandas Periods (D, W-*, M, Q, Y)
-            freq = self._chart_params._normalize_x_period(calendar_unit)  # canonical code
+        # Normalize x_period using existing helper (calendar-aware)
+        freq = None
+        if x_period is not None:
+            freq = self._chart_params._normalize_x_period(x_period)  # e.g., 'D','W-MON','M','Q','Y'
+
+        # Compute absolute delay in "number of periods"
+        if freq:
             s_per = s.dt.to_period(freq)
             e_per = e.dt.to_period(freq)
-            df1 = df0.copy()
-            df1['delay'] = (e_per - s_per).astype('int64')
+            diffs = e_per - s_per
+            delays = pd.Series([d.n for d in diffs], index=s.index).abs()
         else:
-            vals = (e - s)
-            if unit == 'D':
-                vals = vals / np.timedelta64(1, 'D')
-            elif unit == 'h':
-                vals = vals / np.timedelta64(1, 'h')
-            elif unit == 'm':
-                vals = vals / np.timedelta64(1, 'm')
-            else:
-                raise ValueError("unit must be one of 'D','h','m'")
-            df1 = df0.copy()
-            df1['delay'] = np.floor(pd.to_numeric(vals, errors='coerce') / max(bin_size, 1)) * max(bin_size, 1)
+            # default to days if somehow None
+            vals = (e - s).abs() / np.timedelta64(1, 'D')
+            delays = np.floor(pd.to_numeric(vals, errors='coerce') / max(int(bin_size), 1)) * max(int(bin_size), 1)
 
-        # Drop NaNs in delay
+        # Optional integer binning across calendar units (e.g., 3 months, 2 quarters)
+        if freq:
+            b = max(int(bin_size), 1)
+            if b != 1:
+                delays = (delays // b) * b
+
+        df1 = df0.copy()
+        df1['delay'] = delays
         df1 = df1.dropna(subset=['delay'])
 
         # Determine grouping and y (sum column) behavior
@@ -2194,83 +2170,81 @@ class ChartMonkey:
             else:
                 raise ValueError("delay(...): y must be a single column (str), not a sequence.")
 
-        # Alias
-        if mode == 'proportion':
-            mode, normalize = 'incremental', True
-
-        # --- Incremental (per-bin) ---
-        if mode == 'incremental':
-            if grp:
-                if y_col:
-                    data_inc = (df1.groupby([grp, 'delay'], observed=True)[y_col]
-                                    .sum().reset_index(name='value'))
-                    if normalize:
-                        totals = data_inc.groupby(grp)['value'].transform('sum')
-                        data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
-                else:
-                    data_inc = (df1.groupby([grp, 'delay'], observed=True)
-                                    .size().reset_index(name='value'))
-                    if normalize:
-                        totals = data_inc.groupby(grp)['value'].transform('sum')
-                        data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
-
-                data_inc = data_inc.sort_values(['delay', grp])
-                return self.line(data=data_inc, x='delay', y='value', group_by=grp,
-                                aggfunc='sum', ax=ax, finalize=finalize,
-                                **{k: v for k, v in kwargs.items()
-                                    if k not in {'data','x','y','group_by','aggfunc'}})
+        # Default friendly y-axis label (can be overridden by kwargs)
+        if proportion:
+            default_ylabel = 'Proportion'
+        elif y_col:
+            agg = cfg.aggfunc
+            if agg is None:
+                default_ylabel = str(y_col)
+            elif isinstance(agg, str):
+                default_ylabel = f"{agg}({y_col})"
             else:
-                if y_col:
-                    data_inc = (df1.groupby('delay')[y_col].sum()
-                                    .sort_index().rename('value').reset_index())
-                    if normalize:
-                        total = data_inc['value'].sum()
-                        data_inc['value'] = data_inc['value'] / total if total else 0.0
-                else:
-                    data_inc = (df1.groupby('delay').size()
-                                    .sort_index().rename('value').reset_index())
-                    if normalize:
-                        total = data_inc['value'].sum()
-                        data_inc['value'] = data_inc['value'] / total if total else 0.0
+                default_ylabel = f"{getattr(agg, '__name__', 'agg')}({y_col})"
+        else:
+            default_ylabel = 'Count'
 
-                return self.line(data=data_inc, x='delay', y='value',
-                                aggfunc='sum', ax=ax, finalize=finalize,
-                                **{k: v for k, v in kwargs.items()
-                                    if k not in {'data','x','y','aggfunc'}})
-
-        # --- Cumulative (CDF over delay) ---
-        if mode == 'cumulative':
-            if grp:
-                if y_col:
-                    base = (df1.groupby([grp, 'delay'], observed=True)[y_col]
-                                .sum().reset_index(name='value'))
-                else:
-                    base = (df1.groupby([grp, 'delay'], observed=True)
-                                .size().reset_index(name='value'))
-                base = base.sort_values(['delay', grp])
-                base['value'] = base.groupby(grp)['value'].cumsum()
-
-                if normalize and not base.empty:
-                    finals = base.groupby(grp)['value'].transform('max')
-                    base['value'] = np.where(finals.gt(0), base['value'] / finals, 0.0)
-
-                return self.line(data=base, x='delay', y='value', group_by=grp,
-                                aggfunc='sum', ax=ax, finalize=finalize,
-                                **{k: v for k, v in kwargs.items()
-                                    if k not in {'data','x','y','group_by','aggfunc'}})
+        # --- Build incremental base (per-bin) ---
+        if grp:
+            if y_col:
+                base = (df1.groupby([grp, 'delay'], observed=True)[y_col].agg(cfg.aggfunc).reset_index(name='value'))
             else:
-                if y_col:
-                    srs = (df1.groupby('delay')[y_col].sum().sort_index().cumsum())
-                else:
-                    srs = (df1.groupby('delay').size().sort_index().cumsum())
+                base = (df1.groupby([grp, 'delay'], observed=True).size().reset_index(name='value'))
+            base = base.sort_values(['delay', grp])
+        else:
+            if y_col:
+                base = (df1.groupby('delay', observed=True)[y_col].agg(cfg.aggfunc).reset_index(name='value'))
+            else:
+                base = (df1.groupby('delay', observed=True).size().reset_index(name='value'))
+            base = base.sort_values('delay')
 
-                if normalize and not srs.empty:
-                    srs = srs / float(srs.iloc[-1])
+        # Scale to proportions if requested (incremental)
+        data_inc = base.copy()
+        if proportion and not data_inc.empty:
+            if grp:
+                totals = data_inc.groupby(grp, observed=True)['value'].transform('sum')
+                data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
+            else:
+                total = float(data_inc['value'].sum())
+                data_inc['value'] = data_inc['value'] / total if total > 0 else 0.0
 
-                g = srs.rename('value').reset_index()
-                return self.line(data=g, x='delay', y='value',
-                                aggfunc='sum', ax=ax, finalize=finalize,
-                                **{k: v for k, v in kwargs.items()
-                                    if k not in {'data','x','y','aggfunc'}})
+        # Prepare passthrough kwargs (do not leak our local control args)
+        def _passthrough(extras: Dict[str, Any]) -> Dict[str, Any]:
+            merged = {k: v for k, v in kwargs.items()
+                    if k not in {'data','x','x2','y','group_by','aggfunc','x_period',
+                                'incremental','proportion','bin_size','start','end','y_label'}}
+            merged['y_label'] = kwargs.get('y_label', default_ylabel) # user label has priority
+            if proportion and 'y_axis_format' not in kwargs: # show proportions as %
+                merged['y_axis_format'] = 'percent'
+            merged.update(extras)
+            return merged
 
-        raise ValueError("mode must be 'incremental', 'cumulative', or 'proportion'")
+        # Cumulative view
+        if cumulative:
+            data_cum = data_inc if proportion else base
+            if grp:
+                data_cum = data_cum.sort_values(['delay', grp])
+                data_cum['value'] = data_cum.groupby(grp, observed=True)['value'].cumsum()
+                if proportion and not data_cum.empty:
+                    finals = data_cum.groupby(grp, observed=True)['value'].transform('max')
+                    data_cum['value'] = np.where(finals.gt(0), data_cum['value'] / finals, 0.0)
+                return self.line(data=data_cum, x='delay', y='value', group_by=grp,
+                                 aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+            else:
+                data_cum = data_cum.sort_values('delay')
+                data_cum['value'] = data_cum['value'].cumsum()
+                if proportion and not data_cum.empty:
+                    final = float(data_cum['value'].iloc[-1])
+                    data_cum['value'] = data_cum['value'] / final if final > 0 else 0.0
+                return self.line(data=data_cum, x='delay', y='value',
+                                 aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+
+        # Incremental view (default)
+        if grp:
+            return self.line(data=data_inc if proportion else base,
+                             x='delay', y='value', group_by=grp,
+                             aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+        else:
+            return self.line(data=data_inc if proportion else base,
+                             x='delay', y='value',
+                             aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))

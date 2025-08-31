@@ -2,9 +2,16 @@
 
 ## High priority
 
+* delay charts
+ - additional parameter needed for a unique key column(s), so you can summarise e.g. by quarter and get 1 record per user per quarter without having to pre-summarise it
+ - apply comma format by default to y axis when sum is used
 * violin chart
 
 ## Medium priority
+
+* take the logic that checks for passed y value being in the df and move this up the chain to the normalize_kwargs or similar
+e.g. see raise ValueError(f"y={y_col!r} not found in data.")
+* when taking the defensive copy of df, only copy the relevant columns, so if someone passes a huge df we don't copy the whole thing but just take the 3 relevant columns into our copy
 
 * look at the different standard plot "kind" options and add them to this list
  - 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
@@ -14,7 +21,6 @@
 
 ## Low priority
 
-* when taking the defensive copy of df, only copy the relevant columns, so if someone passes a huge df we don't copy the whole thing but just take the 3 relevant columns into our copy
 * review original "impossible" prompt to see what features we haven't implemented yet
 * consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
 * split code into separate modules (as late as possible pre v1.0.0)
