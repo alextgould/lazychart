@@ -3,8 +3,7 @@
 ## High priority
 
 * delay charts
- - additional parameter needed for a unique key column(s), so you can summarise e.g. by quarter and get 1 record per user per quarter without having to pre-summarise it
- - apply comma format by default to y axis when sum is used
+ - where there are multiple records per key over time, need an additional parameter for key column(s), so you can summarise to have one record per key per time period (e.g. one user per quarter)
 * violin chart
 
 ## Medium priority
@@ -25,8 +24,17 @@ e.g. see raise ValueError(f"y={y_col!r} not found in data.")
 * consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
 * split code into separate modules (as late as possible pre v1.0.0)
 
-Prompt (slow):
+Prompt (slow, split up?)
 
+I've attached the latest copy of my lazychart code base in core.py. Help me with this:
+
+2. When using delay charts:
+a. where there are multiple records per key over time, need an additional parameter for key column(s), so you can summarise to have one record per key per time period (e.g. one user per quarter). Aggfunc would be required and would apply where there are multiple records with the same key column(s).
+b. apply comma format by default to y axis when sum is used
+
+# Next charts
+
+```prompt
 I'm thinking about what charts I should add into my lazychart framework next. I note with matplotlib they have 'kind' values which include 'line' 'bar' 'pie', but also include the following: 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
 
 1. Give me a priority rank /10 for each of the above charts, listing them in descending order from highest priority to lowest priority and giving a small explanation of why this priority rating was given.
@@ -36,6 +44,226 @@ I'm thinking about what charts I should add into my lazychart framework next. I 
 3. As a specific example, I want to create PDPs with mix charts, so accepting a sklearn model and having it plot a PDP is less useful than getting the raw chart data and using this to create a plot. I ultimately want the lazychart interface to continue to be super accessible and easy, so for example, it might be good to accept actuals and predicteds, but it might also be good to accept a model object and compatible dataset and have the function create the raw data from these objects. I don't want to overcomplicate my code with all permutations, but also don't want to assume the user will do a bunch of extra work to use what is meant to be a "lazy" package. Give some thoughts on this example as a case study of the more general question of what inputs I should be looking to use with my machine learning related charts.
 
 4. As a final thought exercise, note that the lazychart package is somewhat unique in that it can do not only charting but also data wrangling. For example, we're working on the "delay" chart, where we look at incremental/cumulative distributions bsaed on input dates and/or date columns. I imagine there are similar exercises that we could incorporate, that would allow a data scientist to "cut to the chase" and produce a really useful visualisation without having to transform the data as we can code the data transformation into the charting package. Give me a bunch of examples of this sort of data prep / aggregation -> chart that might be worth considering.
+```
+
+```chatGPT
+1) Priorities for the next “kinds”
+
+Below is a pragmatic, descending priority list (score /10) for the kinds you listed, based on usefulness for EDA/ML work and ease of adding to your current pipeline (which already has bar, line, pie, the shared _chart_pipeline, tidy aggregation, palettes, legends, mix/compare, etc.). 
+ 
+
+hist — 10/10
+Bread-and-butter distribution view; underpins outlier checks, skew, binning choices, and model feature engineering. Add a numeric binning path (specialized aggregation) then plot as bars/step.
+
+scatter — 10/10
+Go-to for relationships, residuals, heteroscedasticity; pairs nicely with mix/compare. First cut = simple x vs y; later add hue=group_by, alpha, jitter.
+
+box — 9/10
+Robust distribution-by-group; great for quick group comparisons. Your long→wide helpers and grouping logic make this straightforward to add on top of the tidy aggregator.
+
+hexbin — 8/10
+Scales scatter to large n. Very handy for dense EDA on continuous features; a good complement to scatter.
+
+kde / density — 8/10
+Smooth distribution view; add for 1D (and possibly 2D later). Start 1D to keep dependencies minimal.
+
+area — 7/10
+Composition over time; can reuse line + fill_between logic, or stacked areas via the existing pivot+stacking percent handling.
+
+barh — 7/10
+Horizontal bar is a UX win for long category labels; trivial addition if you flip axes on your bar primitive.
+
+(“kde” and “density” are normally synonyms—consider exposing one name with an alias.)
+
+2) Other high-value charts for a data scientist
+
+I grouped these by priority for a healthy EDA/ML workflow. Scores reflect impact vs. effort given your architecture (long-form aggregator, group_by, x_period, compare/mix, and figure-level controls). 
+ 
+
+High (10–8)
+
+Correlation matrix (heatmap) — 10/10
+Must-have EDA. Add a helper that computes corr (Pearson/Spearman) and plots as a heatmap with optional mask/annotation.
+
+ROC & PR curves — 10/10
+Model selection basics. Accept either raw y_true/y_score or precomputed curve points. Add micro/macro options for multiclass.
+
+Calibration plot (reliability curve + histogram) — 9/10
+Critical for probabilistic models; offer binning options and ECE/Brier displayed in subtitle.
+
+Confusion matrix (heatmap) — 9/10
+With rates and counts toggle; normalize by true row by default.
+
+Pair plot / scatter matrix — 9/10
+Fast multi-feature overview (sample if big). Start with numeric-only + optional hue.
+
+Violin / boxen / ridgeline (one of) — 8/10
+Deeper distribution comparisons than box; start with violin.
+
+ECDF (cumulative distribution) — 8/10
+Extremely informative, simple to implement via sorted values; pairs well with “delay” style CDF you already have. 
+
+Learning curves (train/val vs. iterations) — 8/10
+For over/underfit diagnosis; accept raw arrays or a tidy df.
+
+Medium (7–6)
+
+PDP & ICE — 8/10
+See section (3) on inputs; expose both charting and data-only APIs.
+
+Feature importance — 7/10
+Agnostic bar chart from provided importances or callable; add permutation importance helper later.
+
+Gain/Lift & KS curves — 7/10
+Very common in scoring workflows; can compute from y_true/y_score.
+
+Residual plots (actual vs. predicted, residual vs. fitted, QQ) — 7/10
+Quick regression diagnostics; low effort once scatter/hist are in.
+
+Target distribution by category (lollipop/ordered bar) — 7/10
+Turns noisy bar charts into readable ranked comparisons.
+
+Nice-to-have (5–4)
+
+Missingness matrix/heatmap — 6/10
+Visualize isna() patterns quickly.
+
+Bump chart (rank over time) — 6/10
+Useful for ranking dynamics; leverages your x_period.
+
+Two-way pivot heatmap (e.g., feature vs. feature) — 6/10
+Great for interaction scouting; simple groupby/pivot + imshow.
+
+3) PDPs as a case study: what inputs should ML charts accept?
+
+You already have a clean pattern: heavy lifting upstream, tidy table downstream, then a primitive that draws and returns (fig, ax, chart_data); plus return_values=True to grab the data. Lean into that. 
+
+Recommend a dual-mode API:
+
+A) Data-first (lightweight, composable)
+
+cm.pdp(
+  data=pdp_df,           # tidy: columns=['feature','grid','pdp'] (+ optional 'ice_id')
+  x='grid', y='pdp',
+  group_by='feature',    # or 'ice_id' to overlay ICE
+  return_values=True
+)
+
+
+Users who already computed PDP/ICE can just plot.
+
+Works perfectly with mix() and compare() out of the box. 
+
+B) Model-aware (convenience, still returns raw data)
+
+cm.pdp(
+  model=estimator, X=df_or_array, features=['age','income'],
+  kind='average',              # 'average' | 'ice' | 'both'
+  grid='quantile',             # 'quantile' | 'linspace' | explicit array
+  ice_samples=1000,            # subsample rows for ICE for speed
+  predict_fn=None,             # optional override; default=prob or predict
+  target_class=None,           # for classification; supports int/label
+  return_values=True
+)
+
+
+Behavior
+
+If data is provided → do not touch the model; just draw.
+
+Else if model and X are provided → compute a tidy pdp_df and then call the same internal draw routine. Always return the computed pdp_df in chart_data to keep the “lazy” ethos.
+
+Predict function resolution:
+
+If classifier with predict_proba and target_class set → use that column.
+
+Else fall back to predict.
+
+Allow predict_fn override for exotic models (XGBoost, LightGBM, pipelines).
+
+Interoperability: because PDP ultimately yields a tidy table, users can feed it right back into mix() (e.g., PDP main + segment mix panel by region), or into compare() (multiple features). 
+
+Keep permutations in check
+
+Two entry paths only (A or B).
+
+A small set of grid options; sensible defaults.
+
+Optional ICE overlays via kind='both' with percentile bands (e.g., 10–90th) rather than every line.
+
+The rest—titles, legends, palettes—already handled centrally by your figure stylers. 
+
+4) “Prep → Chart” shortcuts worth baking in
+
+These mirror your delay chart idea (do the transformation for the user, then visualize). They save tons of analyst time. 
+ 
+
+Cohort retention heatmap
+Prep: derive cohort by first-seen month; compute retention by age (0..N months).
+Chart: month-age heatmap with annotations.
+
+Funnel conversion (with drop-off deltas)
+Prep: count users at each step per segment/date; compute step and cumulative conversion.
+Chart: horizontal step bars + line for cumulative; or waterfall style.
+
+Pareto (80/20) analysis
+Prep: rank categories by contribution; compute cumulative share.
+Chart: bar + line (cumulative %) on secondary axis.
+
+Rolling trend with smoothing
+Prep: compute 7-day/28-day rolling mean and CI.
+Chart: daily line + shaded rolling band; your x_period and show_gaps already help. 
+
+Anomaly (SPC/control) chart
+Prep: mean + 3σ limits (optionally robust MAD).
+Chart: line with horizontal target/limits (you already support target lines). 
+
+AB test uplift with CIs
+Prep: compute metric per variant, standard errors / CIs.
+Chart: point+error bars; optional uplift waterfall.
+
+Calibration (probability reliability)
+Prep: bin predictions, compute observed vs. expected + ECE.
+Chart: line y=x reference + points/bars per bin.
+
+Gain/Lift & KS
+Prep: sort by score, compute cumulative positives, lift, and max KS.
+Chart: lift curve, gains chart, KS vertical marker.
+
+Calendar heatmap
+Prep: aggregate daily metric; pivot by weekday vs week number.
+Chart: year calendar heatmap (or monthly facet).
+
+Lorenz / Gini
+Prep: cumulative share of outcome vs population.
+Chart: Lorenz curve with shaded Gini area.
+
+Ridgeline (joy) distributions
+Prep: per-group density over the same x.
+Chart: stacked filled KDEs (or layered violins).
+
+Bump chart (rank over time)
+Prep: compute rank per time period.
+Chart: multi-line with width or labels at ends.
+
+Two-sample ECDF compare
+Prep: ECDFs for group A vs B.
+Chart: dual ECDFs + D-stat marker (KS).
+
+Confusion matrix + per-class metrics
+Prep: confusion matrix, precision/recall/F1 per class.
+Chart: heatmap + side bar of per-class metrics.
+
+Implementation notes (quick wins)
+
+Reuse _chart_pipeline for: hist (with an internal binning step), scatter, box, violin, area, barh, hexbin. Your tidy aggregator + _pivot_data already sets you up for grouped variants and stacking/percent. 
+
+Use mix() to add automatic contextual side panels (e.g., PDP + segment counts, scatter + group distribution). It already synthesizes a second chart and calls compare. 
+
+Return raw chart data consistently (you already support return_values=True). This is perfect for the “data-then-chart” pattern requested for PDP/ICE. 
+
+You’ve already got bar/line/pie primitives, legends/titles, axis formatting, and smart time binning/gap filling—great foundations to keep new kinds concise. 
+```
 
 # Prompt history
 

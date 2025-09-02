@@ -13,8 +13,10 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.font_manager import FontProperties
 from textwrap import wrap
-from math import ceil
+from math import ceil, floor, log10
 from difflib import get_close_matches
+import colorsys
+import math
 
 # Logging
 from lazychart.log import create_logger
@@ -78,7 +80,9 @@ COMMON_DOCSTRING = """
         Axis bounds; omitted side stays automatic.
     x_axis_format, y_axis_format : {'percent','comma','short'} or None
         Built-in numeric formatters. 'short' ~ 1.2k/3.4M/5.6B.
-    decimals : int, default 0
+        Will auto-detect if left as None
+    decimals : int, optional
+        Will auto-detect if left as None
     xtick_rotation, ytick_rotation : int, optional
         Explicit tick rotations (x auto-rotates when labels are long).
 
@@ -133,6 +137,8 @@ COMMON_DOCSTRING = """
         List of hex colour codes to use for this chart. Use set_palette to apply this to all charts.
     palette_map : dict, optional
         Mapping of labels to hex colour codes to use for this chart. Use set_palette to apply this to all charts.
+    palette_gradient : str, optional
+        Single hex colour code from which shades of the same colour are used to fill the palette.
     target_x : float, optional
         Adds a vertical dotted line at a given x value
     target_y : float, optional
@@ -438,7 +444,7 @@ class ChartConfig:
     y_max: Optional[float] = None
     x_axis_format: AxisFormat = None
     y_axis_format: AxisFormat = None
-    decimals: int = 0
+    decimals: Optional[int] = None
     xtick_rotation: Optional[int] = None
     ytick_rotation: Optional[int] = None
 
@@ -473,10 +479,13 @@ class ChartConfig:
     target_y: Optional[float] = None
     target_x_label: Optional[str] = None
     target_y_label: Optional[str] = None
+    show_total: bool = False # when True and group_by is used, add an overall Total line
+    total_name: str = "Total" # label for the aggregate line (used for legend & palette_map lookup)
 
     # ---- Chart level palette overrides ---
     palette : Optional[Sequence[str]] = None
     palette_map : Dict[Any, str] = field(default_factory=dict)
+    palette_gradient : Optional[str] = None
 
     def _normalize_x_period(self, x_period: str | None, *, week_anchor: str = "W-MON") -> str | None:
         """
@@ -528,8 +537,9 @@ class ChartConfig:
                 self.legend = "bottom"  # type: ignore[assignment]
 
         # Decimals
-        if self.decimals is None or self.decimals < 0:
-            self.decimals = 0
+        # TODO: consider allowing negative decimals to e.g. round to nearest 10 with -1 or 100 with -2
+        if self.decimals and self.decimals < 0:
+            self.decimals = None
 
         # Treat empty string as False for 'show_percent'
         if isinstance(self.show_percent, str) and not self.show_percent.strip():
@@ -624,24 +634,75 @@ def _resolve_fontsize(size: Union[int, str, None], label: str) -> int:
             return preset[label]
     return FONT_PRESETS["medium"][label] # use medium by default
 
-def _format_axis(ax: Axes, which: str, fmt: AxisFormat, decimals: int) -> None:
-    """Apply percent, comma and short formats if requested"""
-    axis = ax.yaxis if which == "y" else ax.xaxis
-    if fmt == "percent":
-        axis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=decimals))
-    elif fmt == "comma":
-        axis.set_major_formatter(mticker.StrMethodFormatter(f"{{x:,.{decimals}f}}"))
-    elif fmt == "short":
-        def short(x, pos=None):
-            if abs(x) >= 1_000_000_000:
-                return f"{x/1_000_000_000:.{decimals}f}B"
-            if abs(x) >= 1_000_000:
-                return f"{x/1_000_000:.{decimals}f}M"
-            if abs(x) >= 1_000:
-                return f"{x/1_000:.{decimals}f}k"
-            return f"{x:.{decimals}f}"
-        axis.set_major_formatter(mticker.FuncFormatter(short))
+def _format_axis(ax: Axes, which: str, fmt: str | None, decimals: int | None) -> None:
+    """
+    Apply percent, comma, short, or auto-detected format to an axis.
 
+    - If `fmt` is provided ("percent", "comma", "short") it is respected.
+    - If `fmt` is None, formatter is auto-selected from axis range:
+        * values in [0,1] → percent
+        * max abs value >= 1e6 → short (M/B)
+        * max abs value >= 1e3 → comma
+        * else → plain decimals
+    - Decimal places are auto-detected from tick step if `decimals` is None,
+      using the rule: needed_dp = -floor(log10(step)), clamped to [0,2].
+    """
+    axis = ax.yaxis if which == "y" else ax.xaxis
+
+    # Range of axis
+    vmin, vmax = axis.get_view_interval()
+    vmax_abs = max(abs(vmin), abs(vmax))
+
+    # Choose format
+    if fmt in ("percent", "comma", "short"):
+        chosen_fmt = fmt
+    else:
+        if vmax <= 1.0 and vmin >= 0.0:
+            chosen_fmt = "percent"
+        elif vmax_abs >= 1_000_000:
+            chosen_fmt = "short"
+        elif vmax_abs >= 1_000:
+            chosen_fmt = "comma"
+        else:
+            chosen_fmt = None
+
+    # Estimate tick step
+    ticks = axis.get_ticklocs()
+    finite_ticks = [t for t in ticks if np.isfinite(t)]
+    if len(finite_ticks) >= 2:
+        step = max(1e-12, finite_ticks[1] - finite_ticks[0])
+    else:
+        step = max(1e-12, vmax - vmin)
+
+    # Pick divisor & suffix based on vmax_abs
+    if chosen_fmt == "short":
+        if vmax_abs >= 1_000_000_000:
+            divisor, suffix = 1_000_000_000, "B"
+        elif vmax_abs >= 1_000_000:
+            divisor, suffix = 1_000_000, "M"
+        elif vmax_abs >= 1_000:
+            divisor, suffix = 1_000, "k"
+        else:
+            divisor, suffix = 1, ""
+    elif chosen_fmt == "percent":
+        divisor, suffix = 0.01, "%"
+    else:
+        divisor, suffix = 1, ""
+
+    # Auto-decimal detection
+    if decimals is None:
+        step = step / divisor if divisor else step
+        decimals = max(0, -floor(log10(step)))
+
+    # Apply formatter
+    if chosen_fmt == "percent":
+        axis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=decimals))
+    elif chosen_fmt == "comma":
+        axis.set_major_formatter(mticker.StrMethodFormatter(f"{{x:,.{decimals}f}}"))
+    elif chosen_fmt == "short":
+        def short(x, pos=None):
+            return f"{x/divisor:.{decimals}f}{suffix}"
+        axis.set_major_formatter(mticker.FuncFormatter(short))
 
 # -----------------------------------------------------------------------------
 # ChartMonkey class
@@ -1459,14 +1520,25 @@ class ChartMonkey:
         subtitle_fontsize = _resolve_fontsize(cfg.subtitle_size, "subtitle")
 
         # Collect handles/labels across all axes; dedupe in order
+        axes_seq = list(axes)  # axes is already a list for compare(); safe for single charts too
+        is_compare = len(axes_seq) > 1 # Treat as 'compare' only if there are multiple axes
         handles, labels, seen = [], [], set()
         for a in axes:
             h, l = a.get_legend_handles_labels()
+            # valid, user-facing labels on this axis
+            valid = [li for li in l if li and li != "_nolegend_"]
+            # In compare/mix: only include entries from axes that *individually* have >1 unique labels
+            if is_compare and len(set(valid)) <= 1:
+                continue
+
+            # Otherwise, add valid labels from this axis, de-duplicated globally
             for hi, li in zip(h, l):
                 if not li or li == "_nolegend_":
                     continue
                 if li not in seen:
-                    seen.add(li); handles.append(hi); labels.append(li)
+                    seen.add(li)
+                    handles.append(hi)
+                    labels.append(li)
 
         # Hide legend if trivial
         if not labels or len(set(labels)) <= 1:
@@ -1655,8 +1727,30 @@ class ChartMonkey:
                     palette[i] = colors[fi % len(colors)]
                     fi += 1
 
+        def generate_shades(palette: list[Optional[str]], color: str) -> list[str]:
+            """Converts one hex colour code into shades of that colour
+            to fill any remaining None slots in the palette
+            """
+            n = sum(c is None for c in palette)
+            base_hex = color.lstrip("#")
+            r = int(base_hex[0:2], 16) / 255.0
+            g = int(base_hex[2:4], 16) / 255.0
+            b = int(base_hex[4:6], 16) / 255.0
+            h, l, s = colorsys.rgb_to_hls(r, g, b)
+            # spread lightness between ~0.25..0.75 for contrast
+            lows, highs = 0.25, 0.75
+            vals = [lows + (highs - lows) * (i / max(n - 1, 1)) for i in range(n)]
+            shades = []
+            for ll in vals:
+                rr, gg, bb = colorsys.hls_to_rgb(h, ll, s)
+                shades.append("#{:02x}{:02x}{:02x}".format(int(rr*255), int(gg*255), int(bb*255)))
+            return shades
+
         if cfg.palette_map:
             fill_from_map(palette, cfg.palette_map)
+        if cfg.palette_gradient:
+            shades = generate_shades(palette, cfg.palette_gradient)
+            fill_from_list(palette, shades)
         if cfg.palette:
             fill_from_list(palette, cfg.palette)
         if self.palette_map:
@@ -1737,6 +1831,20 @@ class ChartMonkey:
                         ax=ax,
                         legend=False)
         return fig, ax, chart_data
+    
+    def _line_total(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Re-aggregate from raw data using the SAME aggfunc but with no group_by.
+        Returns a wide df with a single column named cfg.total_name, indexed by cfg.x.
+        """
+        cfg = self._chart_params
+        original_group_by = cfg.group_by
+        cfg.group_by = None
+        total_long = self._aggregate_data()
+        total_wide = self._pivot_data(total_long)
+        total_wide = total_wide.rename(columns={"value": cfg.total_name or "Total"})
+        cfg.group_by = original_group_by
+        return total_wide
 
     def _line(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
         """
@@ -1753,7 +1861,14 @@ class ChartMonkey:
 
         # Long -> wide (and handle gaps/percent if configured)
         chart_data = self._pivot_data(df)
-        chart_data = chart_data.mask(chart_data.eq(0)) # prefer gaps in lines where no data exists
+
+        # Optional total series
+        if cfg.group_by and cfg.show_total:
+            total = self._line_total(df)
+            chart_data = chart_data.join(total, how="left")
+        
+        # Prefer gaps in lines where no data exists
+        chart_data = chart_data.mask(chart_data.eq(0))
 
         labels_for_color = list(chart_data.columns) if chart_data.shape[1] > 1 else ["value"]
         chart_data.plot(ax=ax, marker="o", color=self._get_palette(labels_for_color), legend=False)
@@ -1812,15 +1927,6 @@ class ChartMonkey:
 
         # Keep the pie circular and centered without messing with x/y limits
         ax.set_aspect('equal', adjustable='box')
-
-        # # Use legend instead of wedge labels if requested
-        # if not cfg.show_labels:
-        #     ax.legend(
-        #         wedges,
-        #         chart_data.index.astype(str).tolist(),
-        #         title=cfg.legend_label or None
-        #     )
-        # ax.axis("equal")
 
         return fig, ax, chart_data
 
