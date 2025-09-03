@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union, Sequence, Tuple, Dict, Callable, Literal, List
 
@@ -19,7 +17,23 @@ import colorsys
 import math
 
 # Logging
-from lazychart.log import create_logger
+#from lazychart.log import create_logger
+#put it here instead of separate module for ease of copying between environments
+import logging
+def create_logger(name: str = __name__, level: int = logging.DEBUG) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # Avoid adding handlers twice if create_logger is called multiple times
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+        logger.addHandler(handler)
+
+    # Silence noisy third-party packages
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    return logger
 logger = create_logger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -201,6 +215,10 @@ ALIASES: Dict[str, str] = {
     "labels_map": "label_map",
     "label_mapping": "label_map",
     "category_map": "label_map",
+
+    # Targets
+    "x_target": "target_x",
+    "y_target": "target_y",
 }
 
 # Composite aliases that expand into multiple canonical keys
@@ -407,6 +425,7 @@ LegendPosition = Literal["right", "bottom", "none"]
 
 @dataclass
 class ChartConfig:
+    """Having all parameters stored here allows them to be used with sticky()"""
 
     # ---- Core selection / aggregation ----
     data: Optional[pd.DataFrame] = None
@@ -416,14 +435,6 @@ class ChartConfig:
     aggfunc: Union[str, Callable] = "sum"
     x_period: Optional[Literal["month", "quarter", "year", "week", "day"]] = None
     show_gaps: bool = True
-
-    # ---- Bar ----
-    stacking: Literal["stacked", "proportion", "none"] = "stacked"
-    
-    # ---- Pie ----
-    values: Optional[str] = None
-    names: Optional[str] = None
-    show_labels: bool = False
 
     # ---- Grouping ----
     group_threshold: Optional[Union[int, float]] = None
@@ -437,6 +448,33 @@ class ChartConfig:
     sort_names: Optional[Union[Literal["label", "value", "none"], Sequence[Any]]] = None
     sort_names_ascending: Optional[bool] = None
 
+    # ---- Bar ----
+    stacking: Literal["stacked", "proportion", "none"] = "stacked"
+
+    # ---- Line ----
+    show_total: bool = False # when True and group_by is used, add an overall Total line
+    total_name: str = "Average" # label for the aggregate line (used for legend & palette_map lookup)
+    
+    # ---- Pie ----
+    values: Optional[str] = None
+    names: Optional[str] = None
+    show_labels: bool = False
+
+    # ---- Delay ----
+    x2: Optional[Union[str, pd.Timestamp]] = None
+    cumulative: bool = False
+    proportion: bool = False
+    bin_size: int = 1
+
+    # ---- Mix / Compare ----
+    mix_kind: Literal['bar','pie','line'] = 'bar'
+    mix_by: Optional[str] = None
+    allow_x_fallback: bool = True
+    mix_max_categories: int = 30
+    mix_max_ratio: float = 0.2
+    mix_subtitle: Optional[str] = 'Mix'
+    sharey: Optional[bool] = None  # figure-level, used by compare()
+    
     # ---- Axis formats ----
     x_min: Optional[float] = None
     x_max: Optional[float] = None
@@ -479,8 +517,6 @@ class ChartConfig:
     target_y: Optional[float] = None
     target_x_label: Optional[str] = None
     target_y_label: Optional[str] = None
-    show_total: bool = False # when True and group_by is used, add an overall Total line
-    total_name: str = "Total" # label for the aggregate line (used for legend & palette_map lookup)
 
     # ---- Chart level palette overrides ---
     palette : Optional[Sequence[str]] = None
@@ -825,9 +861,17 @@ class ChartMonkey:
             # x not found; nothing to coerce
             return df
 
+        # NEW: if x is numeric (e.g., delay bins), do NOT coerce to datetime
+        if pd.api.types.is_numeric_dtype(x_series):
+            return df
+        
         # Ensure datetime
         if not pd.api.types.is_datetime64_any_dtype(x_series):
             try:
+                # pandas >= 2.0: avoids the "Could not infer format..." UserWarning
+                x_series = pd.to_datetime(x_series, errors="raise", format="mixed")
+            except TypeError:
+                # pandas < 2.0 fallback
                 x_series = pd.to_datetime(x_series, errors="raise")
             except Exception:
                 return df
@@ -839,7 +883,9 @@ class ChartMonkey:
         if use_index:
             df.index = pd.DatetimeIndex(coerced.values, name=cfg.x)
         else:
-            df.loc[:, cfg.x] = coerced
+            # Avoid dtype-incompatible .loc setitem
+            df = df.copy()
+            df[cfg.x] = pd.DatetimeIndex(coerced.values)
 
         return df
 
@@ -922,6 +968,10 @@ class ChartMonkey:
             keys.append(cfg.group_by)
         if cfg.names and cfg.names not in keys:
             keys.append(cfg.names)
+
+        # de-duplicate while preserving order (protects reset_index) in case e.g. x=group_by
+        seen = set()
+        keys = [k for k in keys if not (k in seen or seen.add(k))]
 
         # Validate group_by
         if cfg.group_by:
@@ -1832,20 +1882,6 @@ class ChartMonkey:
                         legend=False)
         return fig, ax, chart_data
     
-    def _line_total(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Re-aggregate from raw data using the SAME aggfunc but with no group_by.
-        Returns a wide df with a single column named cfg.total_name, indexed by cfg.x.
-        """
-        cfg = self._chart_params
-        original_group_by = cfg.group_by
-        cfg.group_by = None
-        total_long = self._aggregate_data()
-        total_wide = self._pivot_data(total_long)
-        total_wide = total_wide.rename(columns={"value": cfg.total_name or "Total"})
-        cfg.group_by = original_group_by
-        return total_wide
-
     def _line(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
         """
         Line chart using _pivot_data. Returns (fig, ax, chart_data).
@@ -1862,10 +1898,15 @@ class ChartMonkey:
         # Long -> wide (and handle gaps/percent if configured)
         chart_data = self._pivot_data(df)
 
-        # Optional total series
+        # Optional total average series
         if cfg.group_by and cfg.show_total:
-            total = self._line_total(df)
-            chart_data = chart_data.join(total, how="left")
+            avg_label = (cfg.total_name or "Average")
+            # Treat structural zeros as NaN so gaps don't depress the average
+            avg = chart_data.mask(chart_data.eq(0)).mean(axis=1, skipna=True)
+            chart_data[avg_label] = avg
+            # Default a distinct color if the user didn't map it
+            if avg_label not in cfg.palette_map and avg_label not in self.palette_map:
+                cfg.palette_map[avg_label] = "#000000"  # default black
         
         # Prefer gaps in lines where no data exists
         chart_data = chart_data.mask(chart_data.eq(0))
@@ -2007,15 +2048,7 @@ class ChartMonkey:
         return self._chart_pipeline(self._pie, ax=ax, finalize=finalize, hide_axis_labels=True, style_axes=False, **kwargs)
 
     @add_docstring(COMMON_DOCSTRING)
-    def compare(
-        self,
-        chart1: ChartSpec,
-        chart2: ChartSpec,
-        chart3: Optional[ChartSpec] = None,
-        *,
-        sharey: bool = False,
-        **kwargs: Any,
-    ) -> tuple[Figure, Dict[str, Axes]]:
+    def compare(self, chart1: ChartSpec, chart2: ChartSpec, chart3: Optional[ChartSpec] = None, **kwargs: Any) -> tuple[Figure, Dict[str, Axes]]:
         """Create a side-by-side figure (2 or 3 axes) of individual lazychart charts,
         using the chart proxy to create a ChartSpec for each chart.
 
@@ -2055,7 +2088,7 @@ class ChartMonkey:
         fig_w = sum(w for w, _ in sizes) # side by side charts have additive widths 
         fig_h = max(h for _, h in sizes) # but not additive heights
         width_ratios = [w for w, _ in sizes]
-        fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), sharey=sharey, gridspec_kw={"width_ratios": width_ratios})
+        fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), sharey=fig_cfg.sharey, gridspec_kw={"width_ratios": width_ratios})
          
         # Draw child charts
         chart_data = []
@@ -2068,17 +2101,7 @@ class ChartMonkey:
         self._style_fig(fig, axes)
         return self._save_and_return(fig, axes, chart_data)
     
-    def mix(self,
-            chart1: 'ChartSpec',
-            *,
-            mix_kind: str = 'bar',
-            mix_by: Optional[str] = None,
-            allow_x_fallback: bool = True,
-            mix_max_categories: int = 30,
-            mix_max_ratio: float = 0.2,
-            sharey: bool = False,
-            mix_subtitle: Optional[str] = 'Mix',
-            **kwargs: Any):
+    def mix(self, chart1: 'ChartSpec', **kwargs: Any):
         """
         Compare a primary chart with a simple **class mix** panel.
 
@@ -2128,7 +2151,7 @@ class ChartMonkey:
         df = self._prepare_dataframe()
 
         # 3) Choose mix dimension
-        mix_var = mix_by  # explicit wins
+        mix_var = fig_cfg.mix_by  # explicit wins
         if mix_var is None:
             mix_var = grp_chart or fig_cfg.group_by  # prefer group_by (chart → sticky)
 
@@ -2147,16 +2170,16 @@ class ChartMonkey:
 
             # datetime: treat as categorical only if low-card
             if ptypes.is_datetime64_any_dtype(s):
-                return nunique <= mix_max_categories
+                return nunique <= fig_cfg.mix_max_categories
 
             # numeric: accept small discrete domains
             if ptypes.is_integer_dtype(s) or ptypes.is_numeric_dtype(s):
-                return (nunique <= mix_max_categories) or ((nunique / max(n, 1)) <= mix_max_ratio)
+                return (nunique <= fig_cfg.mix_max_categories) or ((nunique / max(n, 1)) <= fig_cfg.mix_max_ratio)
 
             # default: conservative
-            return nunique <= mix_max_categories
+            return nunique <= fig_cfg.mix_max_categories
 
-        if mix_var is None and allow_x_fallback and isinstance(x_chart, str) and _is_plausibly_categorical(df, x_chart):
+        if mix_var is None and fig_cfg.allow_x_fallback and isinstance(x_chart, str) and _is_plausibly_categorical(df, x_chart):
             mix_var = x_chart
 
         if not mix_var:
@@ -2165,29 +2188,24 @@ class ChartMonkey:
                 "Prefer charts with `group_by`, pass mix_by='column', or ensure x is categorical."
             )
 
-        if mix_kind not in {'bar', 'pie', 'line'}:
+        if fig_cfg.mix_kind not in {'bar', 'pie', 'line'}:
             raise ValueError("mix_kind must be one of: 'bar', 'pie', or 'line'.")
 
         # 4) Build the second spec: simple counts by mix_var (no y)
-        second_kwargs: Dict[str, Any] = {'x': mix_var}
-        if mix_subtitle is not None:
-            second_kwargs['subtitle'] = mix_subtitle
+        second_kwargs: Dict[str, Any] = {'x': mix_var, 'group_by': None, 'x_period': None, 'show_gaps': False, 'names': None, 'values': None}
+        if fig_cfg.mix_subtitle is not None:
+            second_kwargs['subtitle'] = fig_cfg.mix_subtitle
+        if fig_cfg.mix_kind == 'pie':
+            second_kwargs.pop('x', None)
+            second_kwargs['names'] = mix_var
+            second_kwargs['values'] = None  # counts
 
-        chart2 = ChartSpec(self, mix_kind, second_kwargs)
+        chart2 = ChartSpec(self, fig_cfg.mix_kind, second_kwargs)
 
         # 5) Compare (figure-level kwargs already merged via _set_params; still pass through)
-        return self.compare(chart1, chart2, sharey=sharey, **kwargs)
+        return self.compare(chart1, chart2, sharey=fig_cfg.sharey, **kwargs)
 
-    def delay(self, *,
-        x: Union[str, pd.Timestamp, None] = None,
-        x2: Union[str, pd.Timestamp, None] = None,
-        x_period: Optional[Literal['month','quarter','year','week','day']] = 'day',
-        cumulative: bool = False,
-        proportion: bool = False,
-        bin_size: int = 1,
-        ax: Optional[Axes] = None,
-        finalize: bool = True,
-        **kwargs: Any):
+    def delay(self, *, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
         """
         Delay distribution chart.
 
@@ -2213,17 +2231,13 @@ class ChartMonkey:
               - cumulative: the rightmost value reaches 1.0
         bin_size : int, default 1
             Combine consecutive delay bins (e.g., 7-day buckets when x_period='day' and bin_size=7).
-
-        Notes
-        -----
-        - ``start`` / ``end`` are **deprecated** aliases for ``x`` / ``x2`` and will be removed.
         """
-
-        if x is None or x2 is None:
-            raise TypeError("delay(): required arguments missing: x and x2")
 
         # Pull chart config (y/group_by/title/etc.)
         cfg = self._set_params(**kwargs)
+        if cfg.x is None or cfg.x2 is None:
+            raise TypeError("delay(): required arguments missing: x and x2")
+
         df0 = self._prepare_dataframe()  # defensive copy
 
         # Resolve two datetime-like series (column or scalar)
@@ -2236,13 +2250,13 @@ class ChartMonkey:
             except Exception as exc:
                 raise ValueError(f"delay(...): could not parse {val!r} as datetime or column.") from exc
 
-        s, _ = _resolve_datetime(x)
-        e, _ = _resolve_datetime(x2)
+        s, _ = _resolve_datetime(cfg.x)
+        e, _ = _resolve_datetime(cfg.x2)
 
         # Normalize x_period using existing helper (calendar-aware)
         freq = None
-        if x_period is not None:
-            freq = self._chart_params._normalize_x_period(x_period)  # e.g., 'D','W-MON','M','Q','Y'
+        if cfg.x_period is not None:
+            freq = self._chart_params._normalize_x_period(cfg.x_period)  # e.g., 'D','W-MON','M','Q','Y'
 
         # Compute absolute delay in "number of periods"
         if freq:
@@ -2253,11 +2267,11 @@ class ChartMonkey:
         else:
             # default to days if somehow None
             vals = (e - s).abs() / np.timedelta64(1, 'D')
-            delays = np.floor(pd.to_numeric(vals, errors='coerce') / max(int(bin_size), 1)) * max(int(bin_size), 1)
+            delays = np.floor(pd.to_numeric(vals, errors='coerce') / max(int(cfg.bin_size), 1)) * max(int(cfg.bin_size), 1)
 
         # Optional integer binning across calendar units (e.g., 3 months, 2 quarters)
         if freq:
-            b = max(int(bin_size), 1)
+            b = max(int(cfg.bin_size), 1)
             if b != 1:
                 delays = (delays // b) * b
 
@@ -2277,7 +2291,7 @@ class ChartMonkey:
                 raise ValueError("delay(...): y must be a single column (str), not a sequence.")
 
         # Default friendly y-axis label (can be overridden by kwargs)
-        if proportion:
+        if cfg.proportion:
             default_ylabel = 'Proportion'
         elif y_col:
             agg = cfg.aggfunc
@@ -2306,7 +2320,7 @@ class ChartMonkey:
 
         # Scale to proportions if requested (incremental)
         data_inc = base.copy()
-        if proportion and not data_inc.empty:
+        if cfg.proportion and not data_inc.empty:
             if grp:
                 totals = data_inc.groupby(grp, observed=True)['value'].transform('sum')
                 data_inc['value'] = np.where(totals.gt(0), data_inc['value'] / totals, 0.0)
@@ -2320,37 +2334,37 @@ class ChartMonkey:
                     if k not in {'data','x','x2','y','group_by','aggfunc','x_period',
                                 'incremental','proportion','bin_size','start','end','y_label'}}
             merged['y_label'] = kwargs.get('y_label', default_ylabel) # user label has priority
-            if proportion and 'y_axis_format' not in kwargs: # show proportions as %
+            if cfg.proportion and 'y_axis_format' not in kwargs: # show proportions as %
                 merged['y_axis_format'] = 'percent'
             merged.update(extras)
             return merged
 
         # Cumulative view
-        if cumulative:
-            data_cum = data_inc if proportion else base
+        if cfg.cumulative:
+            data_cum = data_inc if cfg.proportion else base
             if grp:
                 data_cum = data_cum.sort_values(['delay', grp])
                 data_cum['value'] = data_cum.groupby(grp, observed=True)['value'].cumsum()
-                if proportion and not data_cum.empty:
+                if cfg.proportion and not data_cum.empty:
                     finals = data_cum.groupby(grp, observed=True)['value'].transform('max')
                     data_cum['value'] = np.where(finals.gt(0), data_cum['value'] / finals, 0.0)
                 return self.line(data=data_cum, x='delay', y='value', group_by=grp,
-                                 aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+                                 aggfunc='sum', x_period=None, ax=ax, finalize=finalize, **_passthrough({}))
             else:
                 data_cum = data_cum.sort_values('delay')
                 data_cum['value'] = data_cum['value'].cumsum()
-                if proportion and not data_cum.empty:
+                if cfg.proportion and not data_cum.empty:
                     final = float(data_cum['value'].iloc[-1])
                     data_cum['value'] = data_cum['value'] / final if final > 0 else 0.0
                 return self.line(data=data_cum, x='delay', y='value',
-                                 aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+                                 aggfunc='sum', x_period=None, ax=ax, finalize=finalize, **_passthrough({}))
 
         # Incremental view (default)
         if grp:
-            return self.line(data=data_inc if proportion else base,
+            return self.line(data=data_inc if cfg.proportion else base,
                              x='delay', y='value', group_by=grp,
-                             aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+                             aggfunc='sum', x_period=None, ax=ax, finalize=finalize, **_passthrough({}))
         else:
-            return self.line(data=data_inc if proportion else base,
+            return self.line(data=data_inc if cfg.proportion else base,
                              x='delay', y='value',
-                             aggfunc='sum', ax=ax, finalize=finalize, **_passthrough({}))
+                             aggfunc='sum', x_period=None, ax=ax, finalize=finalize, **_passthrough({}))
