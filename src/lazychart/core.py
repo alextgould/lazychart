@@ -130,6 +130,13 @@ COMMON_DOCSTRING = """
     x_label_size : int | {'small','medium','large','x-large'}, optional
     y_label_size : int | {'small','medium','large','x-large'}, optional
     tick_size : int | {'small','medium','large','x-large'}, optional
+    footer : str, optional
+        Figure-level footnote shown at the bottom-left. Intended for filters,
+        date ranges, caveats—kept with the chart so it travels with copies.
+    footer_size : int | {'small','medium','large','x-large'}, optional
+        Defaults to smaller than tick labels.
+    footer_color : str, optional
+        Matplotlib color spec for the footnote text. Defaults to a soft grey.
 
     Label helpers
     ------------------------
@@ -498,6 +505,11 @@ class ChartConfig:
     show_fig: bool = True
     return_values: bool = False
 
+    # ---- Footer ----
+    footer: Optional[str] = None
+    footer_size: Optional[Union[int, str]] = None
+    footer_color: Optional[str] = None
+
     # ---- Labels ----
     title: Optional[str] = None
     subtitle: Optional[str] = None
@@ -656,10 +668,10 @@ def _resolve_fontsize(size: Union[int, str, None], label: str) -> int:
     """
 
     FONT_PRESETS = {
-        "small":    {"title": 13, "subtitle": 11, "x_label": 10, "y_label": 10, "tick": 9},
-        "medium":   {"title": 15, "subtitle": 13, "x_label": 12, "y_label": 12, "tick": 11},
-        "large":    {"title": 17, "subtitle": 15, "x_label": 14, "y_label": 14, "tick": 13},
-        "x-large":  {"title": 19, "subtitle": 17, "x_label": 16, "y_label": 16, "tick": 15},
+        "small":    {"title": 13, "subtitle": 11, "x_label": 10, "y_label": 10, "tick": 9,  "footnote": 8},
+        "medium":   {"title": 15, "subtitle": 13, "x_label": 12, "y_label": 12, "tick": 11, "footnote": 9},
+        "large":    {"title": 17, "subtitle": 15, "x_label": 14, "y_label": 14, "tick": 13, "footnote": 11},
+        "x-large":  {"title": 19, "subtitle": 17, "x_label": 16, "y_label": 16, "tick": 15, "footnote": 13},
     }
 
     if isinstance(size, int):
@@ -1568,6 +1580,8 @@ class ChartMonkey:
         legend_pos = cfg.legend or "none"
         title_fontsize = _resolve_fontsize(cfg.title_size, "title")
         subtitle_fontsize = _resolve_fontsize(cfg.subtitle_size, "subtitle")
+        footer_fontsize = _resolve_fontsize(cfg.footer_size, "footnote")
+        footer_color = cfg.footer_color or "#6B7280"  # soft grey
 
         # Collect handles/labels across all axes; dedupe in order
         axes_seq = list(axes)  # axes is already a list for compare(); safe for single charts too
@@ -1600,16 +1614,6 @@ class ChartMonkey:
         if cfg.subtitle:
             subtitle_wrap = self._title_wrap(fig, cfg.subtitle, subtitle_fontsize)
 
-        # If there's no legend, add title/subtitle and return
-        if legend_pos == "none" or not labels:
-            if cfg.title:
-                fig.suptitle(title_wrap, fontsize=title_fontsize)
-            if cfg.subtitle:
-                axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
-            fig.tight_layout()
-            fig.canvas.draw()
-            return
-
         # Wrap legend labels for right-side legends
         if legend_pos == "right" and labels:
             labels = list(self._legend_wrap(fig, labels))
@@ -1618,52 +1622,90 @@ class ChartMonkey:
         if cfg.legend_label is None and cfg.group_by is not None:
             cfg.legend_label = cfg.group_by
         
-        # Create a temporary legend and title to measure required space
+        # Create temporary legend/title (and compute a tentative footer height) to measure required space
         ncol = self._legend_ncol(fig, handles, labels, legend_pos=legend_pos)
-        temp_legend = fig.legend(handles, labels, ncol=ncol, loc="upper right", title=cfg.legend_label or None)
+        temp_legend = None
+        if legend_pos != "none" and labels:
+            temp_legend = fig.legend(handles, labels, ncol=ncol, loc="upper right", title=cfg.legend_label or None)
         if cfg.title:
             temp_title = fig.text(0, 1, title_wrap, fontsize=title_fontsize)
+        else:
+            temp_title = None
 
         # Initialise the renderer
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        # Check required space
-        fig_width, fig_height = fig.get_size_inches() # inches
-        dpi = fig.dpi # convert from pixels to inches
-        legend_bbox = temp_legend.get_window_extent(renderer=renderer) # pixels
-        legend_height = legend_bbox.height / dpi # inches
-        legend_width = legend_bbox.width / dpi # inches 
-        temp_legend.remove()
-        if cfg.title:
-            title_bbox = temp_title.get_window_extent(renderer=renderer) # pixels
-            title_height = title_bbox.height / dpi # inches
+        # Measure spaces
+        fig_width, fig_height = fig.get_size_inches()  # inches
+        dpi = fig.dpi
+        legend_height = 0.0
+        legend_width = 0.0
+        if temp_legend is not None:
+            lb = temp_legend.get_window_extent(renderer=renderer)
+            legend_height = lb.height / dpi
+            legend_width = lb.width / dpi
+        title_height = 0.0
+        if temp_title is not None:
+            tb = temp_title.get_window_extent(renderer=renderer)
+            title_height = tb.height / dpi
+
+        # Estimate footer wrapping and height (reserve even when legend='none')
+        footer_height = 0.0
+        footer_wrap = None
+        if cfg.footer:
+            # Available width fraction for footnote text (shrink if right legend)
+            if legend_pos == "right" and legend_width > 0:
+                avail_w_frac = max(0.05, 1.0 - (legend_width / fig_width))
+            else:
+                avail_w_frac = 1.0
+            fig_w_px = fig_width * dpi
+            approx_char_px = (footer_fontsize * dpi / 72.0) * 0.6
+            max_chars = max(10, int((fig_w_px * avail_w_frac * 0.95) // approx_char_px))
+            from textwrap import wrap as _wrap
+            footer_wrap = "\n".join(_wrap(cfg.footer, max_chars))
+            temp_footer = fig.text(0, 0, footer_wrap, fontsize=footer_fontsize)
+            fig.canvas.draw()
+            fb = temp_footer.get_window_extent(renderer=renderer)
+            footer_height = fb.height / dpi
+            footer_height *= 1.3 # add a margin between the footer and the axis label / legend
+            temp_footer.remove()
+
+        # Cleanup temporary legend/title
+        if temp_legend is not None:
+            temp_legend.remove()
+        if temp_title is not None:
             temp_title.remove()
-        else:
-            title_height = 0
 
         # Expand the figure to accomodate the legend and title
-        if cfg.resize_fig:
-            if legend_pos == "right":
-                new_fig_width = fig_width + legend_width
-                new_fig_height = fig_height + title_height
-            elif legend_pos == "bottom":
-                new_fig_width = fig_width
-                new_fig_height = fig_height + legend_height + title_height
-            fig.set_size_inches(new_fig_width, new_fig_height)
-            fig.canvas.draw()
+        new_fig_width = fig_width
+        new_fig_height = fig_height
+        if legend_pos == "right":
+            new_fig_width = fig_width + legend_width
+            new_fig_height = fig_height + title_height + footer_height
+        elif legend_pos == "bottom":
+            new_fig_width = fig_width
+            new_fig_height = fig_height + legend_height + title_height + footer_height
+        else:  # no legend
+            new_fig_width = fig_width
+            new_fig_height = fig_height + title_height + footer_height
+        fig.set_size_inches(new_fig_width, new_fig_height)
+        fig.canvas.draw()
 
-        # Determine the position of the legend (loc, bbox) and reserve legend/title space using tight_layout rect
-        # rect : tuple (left, bottom, right, top), default: (0, 0, 1, 1)
-        # "A rectangle in normalized figure coordinates into which the whole subplots area (including labels) will fit.""
+        # Determine subplot rect (reserve space for title at top and footer + legend at bottom)
+        # rect : (left, bottom, right, top) in figure coords for the subplots area
         if legend_pos == "right": # right legend
             loc = "center right"
             bbox = (1.0, 0.5)
-            rect = [0, 0, 1 - legend_width / new_fig_width, 1 - title_height / new_fig_height]
-        else: # bottom legend
+            rect = [0, footer_height / new_fig_height, 1 - legend_width / new_fig_width, 1 - title_height / new_fig_height]
+        elif legend_pos == "bottom":  # bottom legend
             loc = "lower center"
-            bbox = (0.5, 0.0)
-            rect = [0, legend_height / new_fig_height, 1, 1 - title_height / new_fig_height]
+            bbox = (0.5, footer_height / new_fig_height)
+            rect = [0, (legend_height + footer_height) / new_fig_height, 1, 1 - title_height / new_fig_height]
+        else: # no legend
+            loc = None
+            bbox = None
+            rect = [0, footer_height / new_fig_height, 1, 1 - title_height / new_fig_height]
 
         # Put subtitle on the first axes
         if cfg.subtitle:
@@ -1678,13 +1720,22 @@ class ChartMonkey:
             title_x = x0 + (x1 - x0) / 2.0
             fig.suptitle(title_wrap, fontsize=title_fontsize, x=title_x)
 
+        # Add footer
+        if cfg.footer and footer_wrap:
+            #x_left = fig.subplotpars.left # anchor to left margin of subplot area
+            x_left = 0.05 # anchor to left of the figure (with optional tiny margin)
+            # margin = (footer_height * 0.3) / new_fig_height
+            # y_pos = (footer_height * 0.5) / new_fig_height + margin # centered in reserved footer band
+            y_pos = 0.0 + (footer_height * 0.1) / new_fig_height # position at the bottom of the reserved footer band with a slight margin
+            fig.text(x_left, y_pos, footer_wrap, fontsize=footer_fontsize, color=footer_color, ha="left", va="center")
+
         # Add final legend in the reserved area
         if legend_pos != "none" and labels:
             ncol = self._legend_ncol(fig, handles, labels, legend_pos)
             if legend_pos == "right":
                 loc, bbox = "center right", (1.0, 0.5)
             else:  # bottom
-                loc, bbox = "lower center", (0.5, 0.0)
+                loc, bbox = "lower center", (0.5, footer_height / new_fig_height)
             fig.legend(handles, labels, ncol=ncol, loc=loc, bbox_to_anchor=bbox, title=cfg.legend_label or None)
 
         fig.canvas.draw()
