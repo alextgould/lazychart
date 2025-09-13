@@ -6,8 +6,7 @@
 
 ## Medium priority
 
-delay charts
- - where there are multiple records per key over time, need an additional parameter for key column(s), so you can summarise to have one record per key per time period (e.g. one user per quarter)
+* When using delay charts, where there are multiple records per key over time, need an additional parameter for key column(s), so you can summarise to have one record per key per time period (e.g. one user per quarter). Aggfunc would be required and would apply where there are multiple records with the same key column(s).
 * Ability to combine charts on the same axes? i.e. take an existing chart and layer another one on top? Is this standard matplotlib functionality? Can I do this using a return_data=True style fig, ax and then pass ax to the next chart?
 * Layered group_by i.e. group_by=[‘col1, ‘col2’] does permutations of col1 x col2?
 * figure level subtitles for compare() charts rather than having it pass down to each individual chart
@@ -16,7 +15,7 @@ e.g. see raise ValueError(f"y={y_col!r} not found in data.")
 * when taking the defensive copy of df, only copy the relevant columns, so if someone passes a huge df we don't copy the whole thing but just take the 3 relevant columns into our copy
 
 * look at the different standard plot "kind" options and add them to this list
- - 'barh', 'hist', 'box', 'kde', 'density', 'area', 'scatter', 'hexbin'
+ - 'barh', 'hist', 'box', 'density', 'area', 'scatter', 'hexbin'
 * update README, including markdown formatted tables of functions/arguments
 * trend lines on line/scatter charts (linear? extrapolate?)
 
@@ -24,18 +23,12 @@ e.g. see raise ValueError(f"y={y_col!r} not found in data.")
 
 * If we use x_max to limit the x axis and as a result only have say 2 ticks, can we force it to get more? Should we manually set up the ticks? Or let the user customise this (e.g. “show_all_x_ticks” or something)
 * Allow target_x = [6, 12] to add multiple grids
-* Add x_target y_target as alias for target_x target_y or vice versa
-
-* review original "impossible" prompt to see what features we haven't implemented yet
 * consider if ChartParams should / shouldn't be responsible for coercing values e.g. currently making x_min/x_max datetime-friendly within the place where we set_xlim
 * split code into separate modules (as late as possible pre v1.0.0)
 
 Prompt (slow, split up?)
 
 I've attached the latest copy of my lazychart code base in core.py. Help me with this:
-
-2. When using delay charts:
-a. where there are multiple records per key over time, need an additional parameter for key column(s), so you can summarise to have one record per key per time period (e.g. one user per quarter). Aggfunc would be required and would apply where there are multiple records with the same key column(s).
 
 # Next charts
 

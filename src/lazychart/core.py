@@ -10,11 +10,12 @@ from matplotlib import rcParams
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.font_manager import FontProperties
+from matplotlib.ticker import FixedLocator, MaxNLocator, LogLocator
+from matplotlib.dates import DateLocator
 from textwrap import wrap
-from math import ceil, floor, log10
+from math import ceil
 from difflib import get_close_matches
 import colorsys
-import math
 
 # Logging
 #from lazychart.log import create_logger
@@ -34,7 +35,7 @@ def create_logger(name: str = __name__, level: int = logging.DEBUG) -> logging.L
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
     return logger
-logger = create_logger(__name__)
+logger = create_logger(__name__) #, level = logging.WARNING)
 
 # -----------------------------------------------------------------------------
 # Common docstring added to all methods
@@ -466,6 +467,10 @@ class ChartConfig:
     values: Optional[str] = None
     names: Optional[str] = None
     show_labels: bool = False
+    show_percent: Union[bool, str] = True
+
+    # --- Hist ----
+    bins: Union[str, int, Sequence[float]] = "auto" # 'auto' | int | sequence of edges
 
     # ---- Delay ----
     x2: Optional[Union[str, pd.Timestamp]] = None
@@ -492,6 +497,7 @@ class ChartConfig:
     decimals: Optional[int] = None
     xtick_rotation: Optional[int] = None
     ytick_rotation: Optional[int] = None
+    max_ticks: int = 20
 
     # ---- Legend & grid ----
     legend: LegendPosition = "right"
@@ -522,7 +528,6 @@ class ChartConfig:
     x_label_size: Optional[Union[int, str]] = None
     y_label_size: Optional[Union[int, str]] = None
     tick_size: Optional[Union[int, str]] = None
-    show_percent: Union[bool, str] = True
 
     # ---- Other ----
     target_x: Optional[float] = None
@@ -606,6 +611,11 @@ class ChartConfig:
         if self.x_period and self.show_gaps is None:
             self.show_gaps = True
 
+        # If stacking/proportion imply percent, set default y_axis_format
+        if self.y_axis_format is None:
+            if self.proportion or getattr(self, "stacking", None) == "proportion":
+                self.y_axis_format = "percent"
+
 # -----------------------------------------------------------------------------
 # Compare API helper
 # -----------------------------------------------------------------------------
@@ -682,6 +692,95 @@ def _resolve_fontsize(size: Union[int, str, None], label: str) -> int:
             return preset[label]
     return FONT_PRESETS["medium"][label] # use medium by default
 
+def _plan_numeric_format(values, fmt: str | None, decimals: int | None, max_decimals: int = 3):
+    """Plan how to render numbers so both axes and bin labels look consistent.
+       Returns dict: {'fmt','decimals','divisor','suffix'}."""
+    
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        v = np.array([0.0, 1.0])
+    vmin, vmax = float(v.min()), float(v.max())
+    vmax_abs = max(abs(vmin), abs(vmax))
+
+    # Decide format family (unless explicitly set)
+    chosen = fmt
+    if chosen is None:
+        if vmin >= 0 and vmax <= 1:
+            chosen = "percent"          # unitless proportions
+        elif vmax_abs >= 1_000_000:
+            chosen = "short"            # M/B
+        elif vmax_abs >= 1_000:
+            chosen = "comma"            # 1,234
+        else:
+            chosen = None               # plain
+
+    # Scale plan
+    if chosen == "short":
+        if vmax_abs >= 1_000_000_000: divisor, suffix = 1_000_000_000, "B"
+        elif vmax_abs >= 1_000_000:   divisor, suffix = 1_000_000, "M"
+        else:                          divisor, suffix = 1_000, "k"
+    elif chosen == "percent":
+        divisor, suffix = 0.01, "%"    # value / 0.01 → percent
+    else:
+        divisor, suffix = 1.0, ""
+
+    # Minimal decimals that keep distinct values distinct (on the scaled domain)
+    if decimals is None:
+        scaled = v / divisor
+        uniq = np.unique(np.sort(scaled))
+        diffs = np.diff(uniq)
+        if diffs.size:
+            step = np.median(diffs[diffs > 0]) if (diffs > 0).any() else max(1e-12, scaled.max() - scaled.min())
+        else:
+            step = 1.0
+        base = max(0, -int(np.floor(np.log10(step))))  # e.g., step=0.12 → 1 decimal; 0.012 → 2 decimals
+        decimals = min(max_decimals, base)
+        # ensure uniqueness at that rounding
+        for d in range(decimals, max_decimals + 1):
+            if np.unique(np.round(uniq, d)).size == uniq.size:
+                decimals = d
+                break
+
+    return {"fmt": chosen, "decimals": int(decimals), "divisor": float(divisor), "suffix": suffix}
+
+def _format_value(v: float, plan: dict) -> str:
+    """Format a value according to planned format, decimals, divisor and suffix"""
+    f, d, k, suf = plan["fmt"], plan["decimals"], plan["divisor"], plan["suffix"]
+    if not np.isfinite(v):
+        return ""
+    if f == "comma":
+        s = f"{v:,.{d}f}"
+        return s.rstrip("0").rstrip(".") if d > 0 else s
+    elif f in ("short", "percent"):
+        s = f"{(v/k):.{d}f}{suf}"
+        return s.rstrip("0").rstrip(".") if d > 0 else s
+    else:
+        return f"{v:.{d}f}"
+
+def _decimals_for_ticks(axis, plan: dict, max_decimals: int = 3) -> int:
+    """Choose minimal decimals so formatted major ticks are distinct."""
+    ticks = axis.get_majorticklocs()
+    if len(ticks) <= 1:
+        return plan.get("decimals", 0)  # nothing to distinguish
+
+    # scale ticks according to plan
+    k = plan.get("divisor", 1.0)  # for percent: 0.01 (so we display x/k)
+    scaled = np.asarray(ticks, dtype=float) / (k if k else 1.0)
+
+    # base guess from step size
+    diffs = np.diff(np.unique(np.round(scaled, 10)))  # guard FP noise
+    step = np.min(diffs[diffs > 0]) if (diffs > 0).any() else (np.max(scaled) - np.min(scaled))
+    base = 0 if step <= 0 else max(0, -int(np.floor(np.log10(step))))  # rough digits from step
+
+    # try increasing decimals until labels are unique
+    for d in range(min(base, max_decimals), max_decimals + 1):
+        labels = [_format_value(x, {**plan, "decimals": d}) for x in ticks]
+        if len(set(labels)) == len(labels):
+            return d
+        
+    return max_decimals
+
 def _format_axis(ax: Axes, which: str, fmt: str | None, decimals: int | None) -> None:
     """
     Apply percent, comma, short, or auto-detected format to an axis.
@@ -692,65 +791,20 @@ def _format_axis(ax: Axes, which: str, fmt: str | None, decimals: int | None) ->
         * max abs value >= 1e6 → short (M/B)
         * max abs value >= 1e3 → comma
         * else → plain decimals
-    - Decimal places are auto-detected from tick step if `decimals` is None,
-      using the rule: needed_dp = -floor(log10(step)), clamped to [0,2].
+    - Decimal places are auto-detected from tick step if `decimals` is None.
     """
-    axis = ax.yaxis if which == "y" else ax.xaxis
 
-    # Range of axis
+    axis = ax.xaxis if which == "x" else ax.yaxis
     vmin, vmax = axis.get_view_interval()
-    vmax_abs = max(abs(vmin), abs(vmax))
+    plan = _plan_numeric_format([vmin, vmax], fmt, decimals)
 
-    # Choose format
-    if fmt in ("percent", "comma", "short"):
-        chosen_fmt = fmt
-    else:
-        if vmax <= 1.0 and vmin >= 0.0:
-            chosen_fmt = "percent"
-        elif vmax_abs >= 1_000_000:
-            chosen_fmt = "short"
-        elif vmax_abs >= 1_000:
-            chosen_fmt = "comma"
-        else:
-            chosen_fmt = None
-
-    # Estimate tick step
-    ticks = axis.get_ticklocs()
-    finite_ticks = [t for t in ticks if np.isfinite(t)]
-    if len(finite_ticks) >= 2:
-        step = max(1e-12, finite_ticks[1] - finite_ticks[0])
-    else:
-        step = max(1e-12, vmax - vmin)
-
-    # Pick divisor & suffix based on vmax_abs
-    if chosen_fmt == "short":
-        if vmax_abs >= 1_000_000_000:
-            divisor, suffix = 1_000_000_000, "B"
-        elif vmax_abs >= 1_000_000:
-            divisor, suffix = 1_000_000, "M"
-        elif vmax_abs >= 1_000:
-            divisor, suffix = 1_000, "k"
-        else:
-            divisor, suffix = 1, ""
-    elif chosen_fmt == "percent":
-        divisor, suffix = 0.01, "%"
-    else:
-        divisor, suffix = 1, ""
-
-    # Auto-decimal detection
+    # If decimals weren’t set explicitly, recompute using the actual ticks
     if decimals is None:
-        step = step / divisor if divisor else step
-        decimals = max(0, -floor(log10(step)))
+        dec = _decimals_for_ticks(axis, plan, max_decimals=6)
+        plan["decimals"] = dec
 
-    # Apply formatter
-    if chosen_fmt == "percent":
-        axis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=decimals))
-    elif chosen_fmt == "comma":
-        axis.set_major_formatter(mticker.StrMethodFormatter(f"{{x:,.{decimals}f}}"))
-    elif chosen_fmt == "short":
-        def short(x, pos=None):
-            return f"{x/divisor:.{decimals}f}{suffix}"
-        axis.set_major_formatter(mticker.FuncFormatter(short))
+    fmt, dec = plan["fmt"], plan["decimals"]
+    axis.set_major_formatter(mticker.FuncFormatter(lambda x, pos=None: _format_value(x, plan)))
 
 # -----------------------------------------------------------------------------
 # ChartMonkey class
@@ -1194,12 +1248,15 @@ class ChartMonkey:
             if is_time:
                 asc = True if cfg.sort_x_ascending is None else bool(cfg.sort_x_ascending)
                 df = df.sort_values(cfg.x, ascending=asc)
-            else:
-                # nominal - enforce explicit order via ordered Categorical
+            elif not pd.api.types.is_numeric_dtype(df[cfg.x]): # coerce non-numeric to categorical
                 order_x = self._resolve_sort_order(df, target=cfg.x, strategy=cfg.sort_x, ascending=cfg.sort_x_ascending)
                 if len(order_x):
                     df[cfg.x] = pd.Categorical(df[cfg.x], categories=list(order_x), ordered=True)
                     df = df.sort_values(cfg.x)
+            else:
+                # numeric axes: respect explicit ascending if provided
+                if cfg.sort_x_ascending is not None:
+                    df = df.sort_values(cfg.x, ascending=bool(cfg.sort_x_ascending))
 
         # group_by ordering
         if cfg.group_by and (cfg.group_by in df.columns):
@@ -1314,6 +1371,40 @@ class ChartMonkey:
             if tx is not None:
                 ax.axvline(x=tx, linestyle="--", color="black", linewidth=1, label=cfg.target_x_label or None)
 
+    def _thin_axis_ticks(self, ax, axis: str = "x", max_ticks: int = 20, target: int = 10) -> None:
+        """Reduce axis ticks when there are too many. Allows up to max_ticks labels, then targets target (10) if above this"""
+
+        if target is None or target <= 0:
+            return
+        a = ax.xaxis if axis == "x" else ax.yaxis
+
+        # Current tick positions & any manually-set texts
+        locs = a.get_majorticklocs()
+        if len(locs) <= max_ticks:
+            return
+
+        # Choose roughly-evenly spaced indices; always include last tick
+        if target > 1:
+            step = int(np.ceil((len(locs) - 1) / (target - 1)))
+        else:
+            step = len(locs)
+        keep_idx = np.arange(0, len(locs), step)
+        if keep_idx[-1] != len(locs) - 1:
+            keep_idx = np.append(keep_idx, len(locs) - 1)
+
+        # Detect whether labels were set manually (FixedFormatter or explicit text)
+        fmt = a.get_major_formatter()
+        is_fixed_fmt = isinstance(fmt, mticker.FixedFormatter)
+        texts = [t.get_text() for t in a.get_ticklabels()]
+        has_manual_texts = is_fixed_fmt or any(s for s in texts)
+
+        # Set the reduced ticks; if labels were manual, subset them too.
+        a.set_ticks(locs[keep_idx])
+        if has_manual_texts:
+            # Map 1:1 onto the kept positions
+            labels_kept = [texts[i] for i in keep_idx]
+            a.set_ticklabels(labels_kept)
+
     def _style_axes(self, fig: Figure, ax: Axes, chart_data: Optional[pd.DataFrame] = None):
         """Apply axis labels, axis limits, axis formats, tick rotation, grid"""
         cfg = self._chart_params
@@ -1333,6 +1424,8 @@ class ChartMonkey:
                     ax.set_xlabel(f"Year ({cfg.x})")
                 elif isinstance(cfg.x_period, str) and cfg.x_period.startswith("W-"):
                     ax.set_xlabel(f"Week ({cfg.x})")
+                elif cfg.x_period == "D":
+                    ax.set_xlabel(f"Day ({cfg.x})")
                 else:
                     ax.set_xlabel(f"{cfg.x_period} ({cfg.x})")
             else:
@@ -1367,46 +1460,48 @@ class ChartMonkey:
         for tick in ax.get_xticklabels() + ax.get_yticklabels():
             tick.set_fontsize(_resolve_fontsize(cfg.tick_size, 'tick'))
 
-        # Apply percent, comma and short formats if requested
-        _format_axis(ax, "x", cfg.x_axis_format, cfg.decimals)
-        _format_axis(ax, "y", cfg.y_axis_format, cfg.decimals)
-
-        # Index min/max range, including individual treatment for date/categorical/numeric x axis 
+        # Determine x_min/x_max range respecting axis type and user overrides
         idx = chart_data.index
         is_dt = isinstance(idx, pd.DatetimeIndex)
         is_cat = (not is_dt) and (idx.dtype == object or pd.api.types.is_categorical_dtype(idx))
 
         if is_dt: # datetime x
-            def _as_dt(v):
+            # Datetime lower/upper bounds (respect cfg.x_min/x_max if provided)
+            def _as_ts(v):
                 if v is None:
                     return None
                 try:
                     return pd.to_datetime(v)
                 except Exception:
                     return v
-            x_min, x_max = _as_dt(cfg.x_min), _as_dt(cfg.x_max)
+            x_min, x_max = _as_ts(cfg.x_min), _as_ts(cfg.x_max)
 
-        elif is_cat: # categorical - map to ordinal positions (0..N-1)
-            def _cat_pos(v):
-                if v is None:
+        elif is_cat and idx is not None:
+            # Categorical: ordinal banding, allow user clamp via integer positions or category labels
+            # If user passed numeric x_min/x_max, interpret as positional clamps.
+            # Else if labels, map to positions.
+            n = len(idx)
+            # defaults: full span with 0.5 padding to center bars
+            x_min, x_max = -0.5, (n - 0.5)
+
+            def _pos_of(label):
+                try:
+                    return int(idx.get_loc(label))
+                except Exception:
                     return None
-                if v in idx:
-                    return int(idx.get_loc(v))
-                if str(v) in idx:
-                    return int(idx.get_loc(str(v)))
-                return None
-            
-            # add a margin on either side
-            x_min, x_max = _cat_pos(cfg.x_min), _cat_pos(cfg.x_max)
-            if x_min is None:
-                x_min = 0
-            if x_max is None:
-                x_max = len(idx) - 1
-            x_min = x_min - 0.5
-            x_max = x_max + 0.5
+
+            # map label → position if strings
+            if cfg.x_min is not None:
+                pos = _pos_of(cfg.x_min) if not isinstance(cfg.x_min, (int, float)) else int(cfg.x_min)
+                if pos is not None:
+                    x_min = pos - 0.5
+            if cfg.x_max is not None:
+                pos = _pos_of(cfg.x_max) if not isinstance(cfg.x_max, (int, float)) else int(cfg.x_max)
+                if pos is not None:
+                    x_max = pos + 0.5
 
         else:
-            # numeric axis
+            # Numeric axis: coerce to float where possible
             def _as_num(v):
                 if v is None:
                     return None
@@ -1416,20 +1511,21 @@ class ChartMonkey:
                     return v
             x_min, x_max = _as_num(cfg.x_min), _as_num(cfg.x_max)
 
-        if x_min is not None or x_max is not None:
+        # Apply x/y min/max if provided/derived
+        if (x_min is not None) or (x_max is not None):
             ax.set_xlim(left=x_min if x_min is not None else ax.get_xlim()[0],
                         right=x_max if x_max is not None else ax.get_xlim()[1])
-        if cfg.y_min is not None or cfg.y_max is not None:
+        if (cfg.y_min is not None) or (cfg.y_max is not None):
             ax.set_ylim(bottom=cfg.y_min if cfg.y_min is not None else ax.get_ylim()[0],
                         top=cfg.y_max if cfg.y_max is not None else ax.get_ylim()[1])
 
-        # x ticks
-        # use set_xticks and set_xticklabels rather than locators and formatters
-        # as the former feels better with our tentency to pre-summarise data (guaranteed tick for each point)
-        # and seems to be more reliable (no odd 1970 epoch formatting issues)
+        # x ticks and labels
+        # set_xticks and set_xticklabels works better than locators and formatters
+        # for categorical and bar-like datetime-with-period cases to guarantee one tick per bar
         if is_dt:
             if cfg.x_period:
-                if ax.lines: # Line chart → keep datetime positions, use locators + formatters
+                is_line = bool(ax.lines)
+                if is_line: # line chart → keep actual datetime positions, use locators + formatters
                     ax.set_xticks(idx)
                     if cfg.x_period == "Q":
                         ax.set_xticklabels([f"{d.year}Q{((d.month-1)//3)+1}" for d in idx])
@@ -1439,7 +1535,7 @@ class ChartMonkey:
                         ax.set_xticklabels([d.strftime("%Y") for d in idx])
                     elif isinstance(cfg.x_period, str) and cfg.x_period.startswith("W-"):
                         ax.set_xticklabels([d.strftime("%d %b %y").lstrip("0") for d in idx])
-                    else:  # Day or anything unusual → fall back
+                    else:  # Day or anything unusual → default short date
                         ax.set_xticklabels([d.strftime("%d %b %y").lstrip("0") for d in idx])
 
                 else: # bar chart → ordinal bins
@@ -1448,10 +1544,41 @@ class ChartMonkey:
                     ax.set_xticks(locs)
                     ax.set_xticklabels(new_labels)
 
-            else: # No x_period
+            else: # no explicit period → use date locators/formatters
                 loc = mdates.AutoDateLocator()
                 ax.xaxis.set_major_locator(loc)
                 ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+
+        elif is_cat and idx is not None: # categorical → fix ticks/labels to index order
+            locs = np.arange(len(idx))
+            ax.set_xticks(locs)
+            ax.set_xticklabels([str(x) for x in idx])
+
+        elif idx is not None: # numeric x → ticks/labels are driven by Matplotlib
+
+            # 1) If the current locator yields too many ticks, replace it with MaxNLocator
+            target = getattr(cfg, "max_xticks", 10)
+            loc = ax.xaxis.get_major_locator()
+
+            # Skip if user or earlier code already set a fixed/date locator (don't fight explicit choices)
+            if not isinstance(loc, (FixedLocator, DateLocator)):
+                # For log scales, prefer LogLocator (keeps powers-of-10 structure)
+                if ax.get_xscale() == "log" and not isinstance(loc, LogLocator):
+                    ax.xaxis.set_major_locator(LogLocator())  # Let LogLocator decide a sane set
+                # Now check how many ticks we currently have
+                ticks_now = ax.xaxis.get_majorticklocs()
+                if len(ticks_now) > target:
+                    # Use MaxNLocator; include a 2.5 step so we can get 2.5, 5, 10-style progressions
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=target, steps=[1, 2, 2.5, 5, 10]))
+
+            # 2) Now that the locator is final, apply the formatter
+            _format_axis(ax, "x", cfg.x_axis_format, cfg.decimals)
+
+        # Final pass: thin crowded x ticks everywhere (bars, lines, density, x_period, etc.)
+        self._thin_axis_ticks(ax, axis="x", max_ticks=getattr(cfg, "max_xticks", 20))
+
+        # y ticks → always numeric
+        _format_axis(ax, "y", cfg.y_axis_format, cfg.decimals)
         
         # Tick rotation
         self._rotate_xticks(ax)
@@ -1920,7 +2047,59 @@ class ChartMonkey:
 
             # For parent flow (e.g., compare), just return the pieces without saving/showing.
             return fig, ax, chart_data
+        
+    def _require_args(self, *required, check_cols=()):
+        """
+        Validate required config attributes AND (optionally) that those attributes
+        refer to columns present in the data.
 
+        Parameters
+        ----------
+        *required : str
+            Names of cfg attributes that must be non-empty (e.g., "x", "y").
+        check_cols : Iterable[str] | bool
+            If an iterable of names (e.g., ("x","y","group_by")), verify those
+            cfg attributes refer to columns present in the prepared DataFrame.
+            If True, treat all `required` as column names.
+            If False, we skip column checks.
+        """
+        cfg = self._chart_params if hasattr(self, "_chart_params") else self.cfg
+
+        # 1) Required non-empty attributes
+        missing = [name for name in required if getattr(cfg, name, None) in (None, "")]
+        if missing:
+            raise TypeError(f"Missing required argument(s): {', '.join(missing)}")
+
+        # 2) Column existence checks (optional)
+        if check_cols:
+            # if check_cols is True, use the `required` list; if it's a collection, use that
+            cols_to_check = required if check_cols is True else tuple(check_cols)
+            df = self._prepare_dataframe()
+            not_found = []
+
+            def _all_in_columns(val):
+                # val might be a single column name, or a sequence of names
+                if isinstance(val, (list, tuple)):
+                    return all(c in df.columns for c in val)
+                return val in df.columns
+
+            for name in cols_to_check:
+                value = getattr(cfg, name, None)
+                if value in (None, ""):
+                    # already caught above, but be defensive
+                    not_found.append(name)
+                    continue
+                if not _all_in_columns(value):
+                    # gather the actual missing column labels for a clearer message
+                    if isinstance(value, (list, tuple)):
+                        missing_cols = [c for c in value if c not in df.columns]
+                        pretty = ", ".join(repr(c) for c in missing_cols)
+                        not_found.append(f"{name} -> {pretty}")
+                    else:
+                        not_found.append(f"{name} -> {value!r}")
+            if not_found:
+                raise ValueError(f"Column(s) not found in data: {', '.join(not_found)}")
+            
     def _bar(self, df: pd.DataFrame, ax: Optional[Axes] = None) -> tuple[Figure, Axes, pd.DataFrame]:
         cfg = self._chart_params
         fig, ax = self._ensure_fig_ax(ax)
@@ -1941,9 +2120,8 @@ class ChartMonkey:
         or a single 'value' column (index=cfg.x) for a single series.
         """
         cfg = self._chart_params
-        if cfg.x is None:
-            raise ValueError("Line charts require `x`.")
-
+        self._require_args('x')
+        
         fig, ax = self._ensure_fig_ax(ax)
 
         # Long -> wide (and handle gaps/percent if configured)
@@ -1962,8 +2140,15 @@ class ChartMonkey:
         # Prefer gaps in lines where no data exists
         chart_data = chart_data.mask(chart_data.eq(0))
 
+        # Choose markers heuristically by series count and point count
+        n_points  = len(chart_data.index)
+        n_series  = chart_data.shape[1]
+        use_markers = (n_points <= 50) or (n_series > 1 and n_points <= 150)
+        marker = "o" if use_markers else None
+
+        # Plot
         labels_for_color = list(chart_data.columns) if chart_data.shape[1] > 1 else ["value"]
-        chart_data.plot(ax=ax, marker="o", color=self._get_palette(labels_for_color), legend=False)
+        chart_data.plot(ax=ax, marker=marker, color=self._get_palette(labels_for_color), legend=False)
 
         return fig, ax, chart_data
 
@@ -1976,6 +2161,7 @@ class ChartMonkey:
         """
         cfg = self._chart_params
         fig, ax = self._ensure_fig_ax(ax, prefer_square=True)
+        self._require_args('values', 'names')
 
         # Determine names column
         names_col = cfg.names or (cfg.x if (cfg.x and cfg.x in df.columns) else None)
@@ -2078,11 +2264,6 @@ class ChartMonkey:
         If ``True``, add percentage text to wedges (``"%1.0f%%"``). If a format
         string is provided, it is passed to Matplotlib's ``autopct``.
 
-        Notes
-        -----
-        Legends are composed at the **figure level** (right/bottom) so the pie itself
-        stays large and centered. Use ``legend='right'`` (default), ``'bottom'``, or ``'none'``.
-
         Examples
         --------
         >>> cm.pie(data=df, names='species', values='count', legend='right', title='Share by species')
@@ -2097,6 +2278,135 @@ class ChartMonkey:
 
         # Pie uses axis-only labels; we hide axes labels explicitly as before.
         return self._chart_pipeline(self._pie, ax=ax, finalize=finalize, hide_axis_labels=True, style_axes=False, **kwargs)
+    
+    @add_docstring(COMMON_DOCSTRING)
+    def hist(self, ax=None, finalize: bool = True, **kwargs):
+        """Histogram of numeric `x` as counts."""
+        
+        cfg = self._set_params(**kwargs)
+        self._require_args('x', check_cols=True)
+        df = self._prepare_dataframe()
+        s = pd.to_numeric(df[cfg.x], errors="coerce").dropna()
+        if s.empty:
+            raise ValueError(f"Column '{cfg.x}' has no valid numeric data for histogram.")
+
+        # Resolve bins
+        bins = cfg.bins if cfg.bins is not None else "auto"
+        edges = np.histogram_bin_edges(s.to_numpy(), bins=bins)
+        counts, _ = np.histogram(s.to_numpy(), bins=edges)
+
+        # Normalize if proportion=True
+        values = counts.astype(float)
+        y_label = "Number of rows in data"
+        if cfg.proportion:
+            total = values.sum()
+            if total > 0:
+                values = values / total
+            y_label = "Proportion"
+
+        # Build tidy data
+        intervals = pd.IntervalIndex.from_breaks(edges, closed="left")
+        plan = _plan_numeric_format(edges, fmt=kwargs.get("x_axis_format"), decimals=kwargs.get("decimals"))
+        labels = [f"[{_format_value(iv.left, plan)}, {_format_value(iv.right, plan)})" for iv in intervals]
+        out = pd.DataFrame({"bin": labels, "value": counts.astype(int)})
+        out["bin"] = pd.Categorical(out["bin"], categories=labels, ordered=True)
+
+        # Delegate to bar()
+        passthrough = {k: v for k, v in kwargs.items() if k not in {"data", "x", "y"}}
+        passthrough.update({
+            "x": "bin",
+            "y": "value",
+            "y_label": passthrough.get("y_label", y_label),
+            "sort_x": passthrough.get("sort_x", "none"),
+        })
+
+        # Default y-axis format for proportions → percent
+        if cfg.proportion and "y_axis_format" not in passthrough:
+            passthrough["y_axis_format"] = "percent"
+
+        return self.bar(data=out, ax=ax, finalize=finalize, **passthrough)
+    
+    @add_docstring(COMMON_DOCSTRING)
+    def density(self, ax=None, finalize: bool = True, **kwargs):
+        """
+        Kernel density estimate (Gaussian). Great for comparing distributions across groups.
+        Note: avoids pandas plot(kind="kde") SciPy dependency.
+
+        Parameters
+        ----------
+        data : DataFrame
+        x : str (numeric)
+        group_by : Optional[str]
+        points : int, default 256   # evaluation grid resolution
+        bandwidth : Optional[float] # if None -> Silverman's rule
+        """
+        import numpy as np
+        import pandas as pd
+
+        cfg = self._set_params(**kwargs)
+        to_check = ["x"]
+        if getattr(cfg, "group_by", None):
+            to_check.append("group_by")
+        self._require_args(*to_check, check_cols=tuple(to_check))
+        df = self._prepare_dataframe()
+        
+        s_all = pd.to_numeric(df[cfg.x], errors="coerce").dropna()
+        if s_all.empty:
+            raise ValueError(f"Column {cfg.x} has no numeric values after coercion.")
+        
+        points = kwargs.pop("points", 256)
+        bw = kwargs.pop("bandwidth", None)
+
+        # Silverman's rule of thumb for Gaussian KDE
+        def _silverman_bandwidth(x):
+            n = len(x)
+            if n < 2:
+                return 1.0
+            std = np.std(x, ddof=1)
+            iqr = np.subtract(*np.percentile(x, [75, 25]))
+            sigma = min(std, iqr / 1.349) if iqr > 0 else std
+            if sigma <= 0:
+                sigma = std if std > 0 else 1.0
+            return 0.9 * sigma * (n ** (-1/5))
+
+        def _kde(x, grid, h=None):
+            x = np.asarray(x, dtype=float)
+            if len(x) == 0:
+                return np.zeros_like(grid)
+            h = _silverman_bandwidth(x) if h is None else float(h)
+            # Gaussian kernel sum; normalize to integrate to 1
+            diffs = (grid[:, None] - x[None, :]) / h
+            vals = np.exp(-0.5 * diffs**2).sum(axis=1) / (len(x) * h * np.sqrt(2*np.pi))
+            return vals
+
+        # Common grid across all data for comparability
+        xmin, xmax = float(s_all.min()), float(s_all.max())
+        if xmin == xmax:
+            xmin -= 0.5
+            xmax += 0.5
+        pad = 0.05 * (xmax - xmin)
+        grid = np.linspace(xmin - pad, xmax + pad, points)
+
+        rows = []
+        if cfg.group_by and (cfg.group_by in df.columns):
+            for g, sub in df[[cfg.x, cfg.group_by]].dropna().groupby(cfg.group_by, observed=True):
+                xg = pd.to_numeric(sub[cfg.x], errors="coerce").dropna().to_numpy()
+                yg = _kde(xg, grid, bw)
+                rows.append(pd.DataFrame({cfg.x: grid, "density": yg, cfg.group_by: g}))
+            out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame({cfg.x: grid, "density": 0.0})
+        else:
+            y = _kde(s_all.to_numpy(), grid, bw)
+            out = pd.DataFrame({cfg.x: grid, "density": y})
+
+        # Delegate to line()
+        passthrough = {k: v for k, v in kwargs.items() if k not in {"data", "x", "y"}}
+        passthrough.update({
+            "x": cfg.x,
+            "y": "density",
+            "y_label": passthrough.get("y_label", "Density"),
+        })
+        
+        return self.line(data=out, ax=ax, finalize=finalize, **passthrough)
 
     @add_docstring(COMMON_DOCSTRING)
     def compare(self, chart1: ChartSpec, chart2: ChartSpec, chart3: Optional[ChartSpec] = None, **kwargs: Any) -> tuple[Figure, Dict[str, Axes]]:

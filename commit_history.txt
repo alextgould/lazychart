@@ -1,0 +1,25 @@
+9195a57 2025-09-04 footers
+6986af2 2025-09-03 fixes to delay chart total, sticky for compare and mix charts
+dfd0d8a 2025-09-03 Total line in group_by line charts, palette_gradient, smart default axis formats and decimals, avoid grouping of single series into compare legends
+248ab58 2025-08-31 delay charts are coming along
+424a003 2025-08-31 compare and mix charts are looking great
+df6cca9 2025-08-31 close on mix charts, about to try something
+4a3b6a9 2025-08-30 various minor improvements
+2b123fa 2025-08-24 line chart x axis date formats are ok for now
+7efc840 2025-08-24 improved example data
+fc26b62 2025-08-23 v0.3.0 compare charts and chart pipeline
+5738fe1 2025-08-23 compare function working
+7babf22 2025-08-23 v.0.2.0 big palette upgrade, api alias flexibility, more robust remapping while sorting
+0e28de8 2025-08-22 palette map work in progress
+9b69de6 2025-08-21 post huge refactor, tests
+cecf28f 2025-08-17 pie charts incorporated, line charts in progress
+0bfce6b 2025-08-17 legends are awesome again
+5f83252 2025-08-17 good progress on legends
+2e68fd2 2025-08-17 constrain to eps is a flop
+09f89fe 2025-08-16 big gpt changes incoming
+68d81fd 2025-08-15 date aggregation, custom sort, right legend wrapping
+3401c12 2025-08-13 legends are awesome
+45a2abf 2025-08-13 logging is good. legends are bad.
+74d13be 2025-08-10 fix misleading dull readme
+a569dab 2025-08-10 initial implementation of general framework and bar method with early testing
+09357d7 2025-08-10 Initial commit
