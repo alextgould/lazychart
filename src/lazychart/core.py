@@ -59,7 +59,7 @@ COMMON_DOCSTRING = """
         Categorical or datetime column for the x-axis (bar/line).
     y : str | Sequence[str], optional
         Value column(s) to aggregate. If omitted, counts are used.
-    group_by : str, optional
+    group_by : str | Sequence[str], optional
         Sub-category column (produces grouped bars / multiple lines).
     aggfunc : str | callable, default 'sum'
         Aggregation function ('sum', 'mean', etc.).
@@ -148,7 +148,8 @@ COMMON_DOCSTRING = """
         If 0< float <=1: keep categories cumulatively until this proportion.
     other_label : str, default 'Other'
         Label for grouped small categories.
-
+    group_joiner: str, default ' • '
+        Where group_by is a list, label has cols separated by group_joiner
     Other
     --------------------
     sticky : bool, default False
@@ -439,7 +440,7 @@ class ChartConfig:
     data: Optional[pd.DataFrame] = None
     x: Optional[str] = None
     y: Optional[Union[str, Sequence[str]]] = None
-    group_by: Optional[str] = None
+    group_by: Optional[Union[str, Sequence[str]]] = None
     aggfunc: Union[str, Callable] = "sum"
     x_period: Optional[Literal["month", "quarter", "year", "week", "day"]] = None
     show_gaps: bool = True
@@ -447,6 +448,7 @@ class ChartConfig:
     # ---- Grouping ----
     group_threshold: Optional[Union[int, float]] = None
     other_label: str = "Other"
+    group_joiner: str = ' • '
 
     # ---- Ordering ----
     sort_x: Optional[Union[Literal["label", "value", "none"], Sequence[Any]]] = None
@@ -481,7 +483,6 @@ class ChartConfig:
     # ---- Mix / Compare ----
     mix_kind: Literal['bar','pie','line'] = 'bar'
     mix_by: Optional[str] = None
-    allow_x_fallback: bool = True
     mix_max_categories: int = 30
     mix_max_ratio: float = 0.2
     mix_subtitle: Optional[str] = 'Mix'
@@ -661,7 +662,8 @@ class ChartSpec:
         Returns fig, ax, chart_data
         """
         method = getattr(self._cm, self.kind)
-        merged = {**overrides, **self.kwargs}  # child kwargs override compare-level
+        clean = {k: v for k, v in overrides.items() if k != 'subtitle'}
+        merged = {**clean, **self.kwargs}  # child kwargs override compare-level
         return method(ax=ax, finalize=False, **merged)
 
 # -----------------------------------------------------------------------------
@@ -896,14 +898,87 @@ class ChartMonkey:
 # Core Data Logic                                                           
 # -----------------------------------------------------------------------------
 
-    def _prepare_dataframe(self) -> pd.DataFrame:
-        """Check data to chart exists and return a defensive copy to avoid modifying caller's dataframe."""
+    def _collect_required_columns(self, *, cfg=None, extras=None):
+        """
+        Compute the set of columns we should keep for this render.
+        - Pulls x, x2, y, values, names
+        - Flattens group_by if list/tuple
+        - Merges any explicit extras passed by the caller (e.g., child chart needs)
+        """
+        import itertools
+        cfg = cfg or self._chart_params
+        cols = []
+
+        for name in ['x', 'x2', 'y', 'values', 'names']:
+            val = getattr(cfg, name, None)
+            if isinstance(val, str):
+                cols.append(val)
+            elif isinstance(val, (list, tuple)):
+                cols.extend([c for c in val if isinstance(c, str)])
+
+        gb = getattr(cfg, 'group_by', None)
+        if isinstance(gb, str):
+            cols.append(gb)
+        elif isinstance(gb, (list, tuple)):
+            cols.extend([c for c in gb if isinstance(c, str)])
+
+        if extras:
+            if isinstance(extras, (list, tuple, set)):
+                cols.extend([c for c in extras if isinstance(c, str)])
+            elif isinstance(extras, str):
+                cols.append(extras)
+
+        # De-dupe while preserving order
+        seen, ordered = set(), []
+        for c in cols:
+            if c not in seen:
+                ordered.append(c); seen.add(c)
+        return ordered
+
+    def _prepare_dataframe(self, *, extras: list[str] | tuple[str, ...] | None = None) -> pd.DataFrame:
+        """
+        Check data exists, then return a defensive copy with only the columns
+        required for this chart (+ any extras the caller specifies).
+        """
+
+        # check data exists
         cfg = self._chart_params
-        if cfg.data is None:
+        data = cfg.data
+        if data is None:
             raise ValueError("`data` must be provided in ChartConfig (or via kwargs/sticky).")
-        if not isinstance(cfg.data, pd.DataFrame):
+        if not isinstance(data, pd.DataFrame):
             raise TypeError("`data` must be a pandas DataFrame.")
-        return cfg.data.copy()
+        
+        # check which columns we need
+        cols = self._collect_required_columns(cfg=cfg, extras=extras)
+
+        # take a defensive copy of the data, keeping only the needed columns
+        cols_that_exist = [c for c in cols if c in data.columns]
+        df = data[cols_that_exist].copy()
+
+        # resolve composite group_by
+        if isinstance(cfg.group_by, (list, tuple)):
+            df, gcol = self._resolve_group_by(df)
+            cfg.group_by = gcol  # now always str or None
+
+        # resolve composite x
+        if isinstance(cfg.x, (list, tuple)):
+            # pretend x is group_by so we can reuse the same resolver
+            saved = cfg.group_by
+            cfg.group_by = cfg.x
+            df, xcol = self._resolve_group_by(df)
+            cfg.x = xcol  # now always str
+            cfg.group_by = saved
+
+        # resolve composite names (pie), mirroring group_by/x handling
+        if isinstance(cfg.names, (list, tuple)):
+            saved = cfg.group_by
+            cfg.group_by = cfg.names
+            df, ncol = self._resolve_group_by(df)
+            cfg.group_by = saved
+            cfg.names = ncol
+
+        return df
 
     def _coerce_x_period(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -960,8 +1035,16 @@ class ChartMonkey:
         cfg = self._chart_params
         if not cfg.label_map:
             return df
-        for col in (cfg.x, cfg.group_by, cfg.names):
-            if col and col in df.columns:
+        cols = []
+        if cfg.x: cols.append(cfg.x)
+        if cfg.group_by:
+            if isinstance(cfg.group_by, (list, tuple)):
+                cols.extend([c for c in cfg.group_by if c in df.columns])
+            else:
+                cols.append(cfg.group_by)
+        if cfg.names: cols.append(cfg.names)
+        for col in cols:
+            if col in df.columns:
                 df[col] = df[col].map(cfg.label_map).fillna(df[col])
         return df
 
@@ -995,6 +1078,44 @@ class ChartMonkey:
         other_name = cfg.other_label or "Other"
         df[target_col] = np.where(df[target_col].isin(keep), df[target_col], other_name)
         return df
+    
+    def _resolve_group_by(self, df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+        """
+        Resolve cfg.group_by into a single column name present in df.
+
+        - If cfg.group_by is a str that exists in df, return it.
+        - If it's a list/tuple, build a composite string column joined with cfg.group_joiner.
+        - Returns (possibly modified df, resolved group_by name or None).
+        """
+        cfg = self._chart_params
+        g = getattr(cfg, "group_by", None)
+        if not g:
+            return df, None
+
+        # Simple case: a single existing column
+        if isinstance(g, str) and g in df.columns:
+            return df, g
+
+        # Composite case
+        if isinstance(g, (list, tuple)):
+            combo_cols = [c for c in g if isinstance(c, str) and c in df.columns]
+            if not combo_cols:
+                raise ValueError("group_by list did not match any columns in the data.")
+
+            # Name the composite column using the column names (stable & readable)
+            base_name = "_".join(combo_cols)
+            combo_name = base_name if base_name not in df.columns else f"{base_name}__combo"
+
+            # Build human-friendly composite labels for the observed rows
+            parts = df[combo_cols].astype("string").fillna("NA")
+            sep = cfg.group_joiner if cfg.group_joiner is not None else " · "
+
+            df = df.copy()
+            df[combo_name] = parts.agg(lambda r: sep.join(r.tolist()), axis=1)
+            return df, combo_name
+
+        # Fallback: nothing usable
+        return df, None
 
     def _aggregate_data(self) -> pd.DataFrame:
         """
@@ -1712,7 +1833,7 @@ class ChartMonkey:
 
         # Collect handles/labels across all axes; dedupe in order
         axes_seq = list(axes)  # axes is already a list for compare(); safe for single charts too
-        is_compare = len(axes_seq) > 1 # Treat as 'compare' only if there are multiple axes
+        is_compare = len(axes_seq) > 1 # Treat as 'compare' if there are multiple axes
         handles, labels, seen = [], [], set()
         for a in axes:
             h, l = a.get_legend_handles_labels()
@@ -1749,7 +1870,7 @@ class ChartMonkey:
         if cfg.legend_label is None and cfg.group_by is not None:
             cfg.legend_label = cfg.group_by
         
-        # Create temporary legend/title (and compute a tentative footer height) to measure required space
+        # Create temporary legend/title/subtitle (and compute a tentative footer height) to measure required space
         ncol = self._legend_ncol(fig, handles, labels, legend_pos=legend_pos)
         temp_legend = None
         if legend_pos != "none" and labels:
@@ -1758,6 +1879,10 @@ class ChartMonkey:
             temp_title = fig.text(0, 1, title_wrap, fontsize=title_fontsize)
         else:
             temp_title = None
+        temp_subtitle = None
+        subtitle_height = 0.0
+        if cfg.subtitle:
+            temp_subtitle = fig.text(0, 1, subtitle_wrap, fontsize=subtitle_fontsize)
 
         # Initialise the renderer
         fig.canvas.draw()
@@ -1776,7 +1901,10 @@ class ChartMonkey:
         if temp_title is not None:
             tb = temp_title.get_window_extent(renderer=renderer)
             title_height = tb.height / dpi
-
+        if temp_subtitle is not None:
+            sb = temp_subtitle.get_window_extent(renderer=renderer)
+            subtitle_height = sb.height / dpi
+        
         # Estimate footer wrapping and height (reserve even when legend='none')
         footer_height = 0.0
         footer_wrap = None
@@ -1803,19 +1931,28 @@ class ChartMonkey:
             temp_legend.remove()
         if temp_title is not None:
             temp_title.remove()
+        if temp_subtitle is not None:
+            temp_subtitle.remove()
 
-        # Expand the figure to accomodate the legend and title
+        # Expand the figure to accomodate the legend and title(s)
         new_fig_width = fig_width
         new_fig_height = fig_height
+        top_height = 0.0
+        if cfg.title:
+            title_margin = 0 #0.5 # max(0.2, (title_fontsize / 72.0) * 0.4)
+            top_height += title_height + title_margin
+        if cfg.subtitle:
+            subtitle_margin = 0 #max(0.08, (subtitle_fontsize / 72.0) * 0.4)
+            top_height += subtitle_height + subtitle_margin
         if legend_pos == "right":
             new_fig_width = fig_width + legend_width
-            new_fig_height = fig_height + title_height + footer_height
+            new_fig_height = fig_height + top_height + footer_height
         elif legend_pos == "bottom":
             new_fig_width = fig_width
-            new_fig_height = fig_height + legend_height + title_height + footer_height
+            new_fig_height = fig_height + legend_height + top_height + footer_height
         else:  # no legend
             new_fig_width = fig_width
-            new_fig_height = fig_height + title_height + footer_height
+            new_fig_height = fig_height + top_height + footer_height
         fig.set_size_inches(new_fig_width, new_fig_height)
         fig.canvas.draw()
 
@@ -1824,35 +1961,40 @@ class ChartMonkey:
         if legend_pos == "right": # right legend
             loc = "center right"
             bbox = (1.0, 0.5)
-            rect = [0, footer_height / new_fig_height, 1 - legend_width / new_fig_width, 1 - title_height / new_fig_height]
+            rect = [0, footer_height / new_fig_height, 1 - legend_width / new_fig_width, 1 - top_height / new_fig_height]
         elif legend_pos == "bottom":  # bottom legend
             loc = "lower center"
             bbox = (0.5, footer_height / new_fig_height)
-            rect = [0, (legend_height + footer_height) / new_fig_height, 1, 1 - title_height / new_fig_height]
+            rect = [0, (legend_height + footer_height) / new_fig_height, 1, 1 - top_height / new_fig_height]
         else: # no legend
             loc = None
             bbox = None
-            rect = [0, footer_height / new_fig_height, 1, 1 - title_height / new_fig_height]
-
-        # Put subtitle on the first axes
-        if cfg.subtitle:
-            axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
+            rect = [0, footer_height / new_fig_height, 1, 1 - top_height / new_fig_height]
 
         fig.tight_layout(rect=rect)
 
-        # Center suptitle over the union of axes
+        # Center titles over the union of axes
+        boxes = [a.get_position() for a in axes]
+        x0 = min(b.x0 for b in boxes)
+        x1 = max(b.x1 for b in boxes)
+        title_x = x0 + (x1 - x0) / 2.0
+
         if cfg.title:
-            boxes = [a.get_position() for a in axes]
-            x0 = min(b.x0 for b in boxes); x1 = max(b.x1 for b in boxes)
-            title_x = x0 + (x1 - x0) / 2.0
-            fig.suptitle(title_wrap, fontsize=title_fontsize, x=title_x)
+            # Title top edge: headroom only
+            y_title = 1.0 - (title_margin * 0.5) / new_fig_height
+            fig.suptitle(title_wrap, fontsize=title_fontsize, x=title_x, y=y_title, va='top')
+
+        if cfg.subtitle:
+            if is_compare:
+                # Subtitle top edge: title_margin + title_height + a fraction of subtitle_gap
+                y_sub = 1.0 - (title_margin + title_height + 0.5 * subtitle_margin) / new_fig_height
+                fig.text(title_x, y_sub, subtitle_wrap, fontsize=subtitle_fontsize, ha='center', va='top')
+            else:
+                axes[0].set_title(subtitle_wrap, fontsize=subtitle_fontsize)
 
         # Add footer
         if cfg.footer and footer_wrap:
-            #x_left = fig.subplotpars.left # anchor to left margin of subplot area
             x_left = 0.05 # anchor to left of the figure (with optional tiny margin)
-            # margin = (footer_height * 0.3) / new_fig_height
-            # y_pos = (footer_height * 0.5) / new_fig_height + margin # centered in reserved footer band
             y_pos = 0.0 + (footer_height * 0.1) / new_fig_height # position at the bottom of the reserved footer band with a slight margin
             fig.text(x_left, y_pos, footer_wrap, fontsize=footer_fontsize, color=footer_color, ha="left", va="center")
 
@@ -2048,7 +2190,7 @@ class ChartMonkey:
             # For parent flow (e.g., compare), just return the pieces without saving/showing.
             return fig, ax, chart_data
         
-    def _require_args(self, *required, check_cols=()):
+    def _require_args(self, df: pd.DataFrame, *required, check_cols=()):
         """
         Validate required config attributes AND (optionally) that those attributes
         refer to columns present in the data.
@@ -2074,7 +2216,6 @@ class ChartMonkey:
         if check_cols:
             # if check_cols is True, use the `required` list; if it's a collection, use that
             cols_to_check = required if check_cols is True else tuple(check_cols)
-            df = self._prepare_dataframe()
             not_found = []
 
             def _all_in_columns(val):
@@ -2120,7 +2261,7 @@ class ChartMonkey:
         or a single 'value' column (index=cfg.x) for a single series.
         """
         cfg = self._chart_params
-        self._require_args('x')
+        self._require_args(df, 'x')
         
         fig, ax = self._ensure_fig_ax(ax)
 
@@ -2161,7 +2302,7 @@ class ChartMonkey:
         """
         cfg = self._chart_params
         fig, ax = self._ensure_fig_ax(ax, prefer_square=True)
-        self._require_args('values', 'names')
+        self._require_args(df, 'names')
 
         # Determine names column
         names_col = cfg.names or (cfg.x if (cfg.x and cfg.x in df.columns) else None)
@@ -2284,8 +2425,8 @@ class ChartMonkey:
         """Histogram of numeric `x` as counts."""
         
         cfg = self._set_params(**kwargs)
-        self._require_args('x', check_cols=True)
         df = self._prepare_dataframe()
+        self._require_args(df, 'x', check_cols=True)
         s = pd.to_numeric(df[cfg.x], errors="coerce").dropna()
         if s.empty:
             raise ValueError(f"Column '{cfg.x}' has no valid numeric data for histogram.")
@@ -2347,9 +2488,9 @@ class ChartMonkey:
         to_check = ["x"]
         if getattr(cfg, "group_by", None):
             to_check.append("group_by")
-        self._require_args(*to_check, check_cols=tuple(to_check))
         df = self._prepare_dataframe()
-        
+        self._require_args(df, *to_check, check_cols=tuple(to_check))
+
         s_all = pd.to_numeric(df[cfg.x], errors="coerce").dropna()
         if s_all.empty:
             raise ValueError(f"Column {cfg.x} has no numeric values after coercion.")
@@ -2399,14 +2540,17 @@ class ChartMonkey:
             out = pd.DataFrame({cfg.x: grid, "density": y})
 
         # Delegate to line()
-        passthrough = {k: v for k, v in kwargs.items() if k not in {"data", "x", "y"}}
-        passthrough.update({
-            "x": cfg.x,
-            "y": "density",
-            "y_label": passthrough.get("y_label", "Density"),
-        })
-        
-        return self.line(data=out, ax=ax, finalize=finalize, **passthrough)
+        passthrough = {k: v for k, v in kwargs.items() if k not in {"data", "x", "y", "group_by"}}
+        return self.line(
+            data=out,
+            ax=ax,
+            x=cfg.x,
+            y="density",
+            group_by=cfg.group_by,
+            y_label="Density",
+            finalize=finalize,
+            **passthrough
+        )
 
     @add_docstring(COMMON_DOCSTRING)
     def compare(self, chart1: ChartSpec, chart2: ChartSpec, chart3: Optional[ChartSpec] = None, **kwargs: Any) -> tuple[Figure, Dict[str, Axes]]:
@@ -2480,8 +2624,6 @@ class ChartMonkey:
             Chart type for the mix panel.
         mix_by : str, optional
             Column to show the mix over (overrides heuristics).
-        allow_x_fallback : bool, default True
-            Allow falling back to `x` when no `group_by` is found and `x` is categorical.
         mix_max_categories : int, default 30
             Absolute unique-count threshold for categorical fallback.
         mix_max_ratio : float, default 0.2
@@ -2499,22 +2641,26 @@ class ChartMonkey:
         if not isinstance(chart1, ChartSpec):
             raise TypeError("mix(...): pass a chart created with cm.chart.<kind>(...).")
 
-        # 0) Pull sticky params & figure-level kwargs (like compare() does)
         fig_cfg = self._set_params(**kwargs)
 
-        # 1) Read first-chart kwargs
+        # read first-chart kwargs
         ckwargs = dict(chart1.kwargs)
         grp_chart = ckwargs.get('group_by', None)
         x_chart   = ckwargs.get('x', None)
 
-        # 2) Resolve the dataframe once (respects sticky cfg.data, filters, etc.)
-        #    _prepare_dataframe uses the cfg set by _set_params above.
-        df = self._prepare_dataframe()
-
-        # 3) Choose mix dimension
-        mix_var = fig_cfg.mix_by  # explicit wins
-        if mix_var is None:
-            mix_var = grp_chart or fig_cfg.group_by  # prefer group_by (chart → sticky)
+        # ensure needed columns are kept
+        extra_cols = []
+        if isinstance(x_chart, str):
+            extra_cols.append(x_chart)
+        elif isinstance(x_chart, (list, tuple)):
+            extra_cols.extend([c for c in x_chart if isinstance(c, str)])
+        if isinstance(grp_chart, str):
+            extra_cols.append(grp_chart)
+        elif isinstance(grp_chart, (list, tuple)):
+            extra_cols.extend([c for c in grp_chart if isinstance(c, str)])
+        elif isinstance(fig_cfg.group_by, (list, tuple)):
+            extra_cols.extend([c for c in fig_cfg.group_by if isinstance(c, str)])
+        df = self._prepare_dataframe(extras=extra_cols)
 
         # helper: decide if a df column is plausibly categorical
         def _is_plausibly_categorical(df: pd.DataFrame, col: str) -> bool:
@@ -2539,31 +2685,62 @@ class ChartMonkey:
 
             # default: conservative
             return nunique <= fig_cfg.mix_max_categories
-
-        if mix_var is None and fig_cfg.allow_x_fallback and isinstance(x_chart, str) and _is_plausibly_categorical(df, x_chart):
-            mix_var = x_chart
+        
+        # where x_chart/grp_chart is list/tuple, create composite column before applying plausible categorical check
+        def _resolve_local(df, maybe_list):
+            if isinstance(maybe_list, (list, tuple)):
+                saved = self._chart_params.group_by
+                self._chart_params.group_by = maybe_list
+                df, name = self._resolve_group_by(df)
+                self._chart_params.group_by = saved
+                return df, name
+            return df, maybe_list
+        df, mix_by_resolved = _resolve_local(df, fig_cfg.mix_by)
+        df, grp_resolved = _resolve_local(df, grp_chart)
+        df, x_resolved = _resolve_local(df, x_chart)
+        df, cfg_grp_resolved = _resolve_local(df, fig_cfg.group_by)
+        
+        # choose mix dimension, retaining both resolved name (for heuristics) AND original spec (for child)
+        mix_src = None
+        mix_var = None
+        if mix_by_resolved is not None:
+            mix_src = fig_cfg.mix_by           # could be list/tuple or str
+            mix_var = mix_by_resolved          # always a str (resolved name)
+        elif grp_resolved is not None:
+            mix_src = grp_chart
+            mix_var = grp_resolved
+        elif cfg_grp_resolved is not None:
+            mix_src = fig_cfg.group_by
+            mix_var = cfg_grp_resolved
+        
+        # Fallback to x if needed (use resolved name for the categorical test, but pass the original x spec to the child if chosen)
+        if mix_var is None and x_resolved and _is_plausibly_categorical(df, x_resolved):
+            mix_src = x_chart                  # keep list/tuple if that’s what user passed
+            mix_var = x_resolved               # string, used only for the plausibility check
 
         if not mix_var:
             raise ValueError(
                 "mix(...): could not infer a categorical field for the mix panel. "
-                "Prefer charts with `group_by`, pass mix_by='column', or ensure x is categorical."
+                "Add a `group_by`, pass mix_by='column', or ensure x is categorical."
             )
-
         if fig_cfg.mix_kind not in {'bar', 'pie', 'line'}:
             raise ValueError("mix_kind must be one of: 'bar', 'pie', or 'line'.")
 
-        # 4) Build the second spec: simple counts by mix_var (no y)
-        second_kwargs: Dict[str, Any] = {'x': mix_var, 'group_by': None, 'x_period': None, 'show_gaps': False, 'names': None, 'values': None}
+        # build the second spec
+        second_kwargs: Dict[str, Any] = {'x': mix_src, 'group_by': None, 'x_period': None, 'show_gaps': False, 'names': None, 'values': None}
         if fig_cfg.mix_subtitle is not None:
             second_kwargs['subtitle'] = fig_cfg.mix_subtitle
         if fig_cfg.mix_kind == 'pie':
+            # For pie, pass the original spec via group_by (to build composite),
+            # and the resolved composite name as `names` (hashable str).
             second_kwargs.pop('x', None)
-            second_kwargs['names'] = mix_var
-            second_kwargs['values'] = None  # counts
+            second_kwargs['group_by'] = mix_src     # may be list/tuple or str
+            second_kwargs['names'] = mix_var        # resolved str like 'mindset_emotion'
+            second_kwargs['values'] = None          # counts
 
         chart2 = ChartSpec(self, fig_cfg.mix_kind, second_kwargs)
-
-        # 5) Compare (figure-level kwargs already merged via _set_params; still pass through)
+        
+        # compare (figure-level kwargs already merged via _set_params; still pass through)
         return self.compare(chart1, chart2, sharey=fig_cfg.sharey, **kwargs)
 
     def delay(self, *, ax: Optional[Axes] = None, finalize: bool = True, **kwargs: Any):
